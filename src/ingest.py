@@ -120,16 +120,33 @@ async def ingest_weekly() -> pd.DataFrame:
         cg_task = asyncio.create_task(_fetch_coingecko(client))
         cm_task = asyncio.create_task(_fetch_coinmetrics(client))
         walcl_task = asyncio.create_task(_fetch_fred_series(client, "WALCL"))
+        ecb_task = asyncio.create_task(
+            _fetch_fred_series(client, "ECBASSETS")
+        )
         dxy_task = asyncio.create_task(_fetch_fred_series(client, "DTWEXBGS"))
         ust10_task = asyncio.create_task(_fetch_fred_series(client, "DGS10"))
+        gold_task = asyncio.create_task(
+            _fetch_fred_series(client, "GOLDAMGBD228NLBM")
+        )
+        sp500_task = asyncio.create_task(_fetch_fred_series(client, "SP500"))
 
         cg_data = _coingecko_to_weekly(await cg_task)
         cm_data = await cm_task
         walcl = await walcl_task
+        ecb = await ecb_task
         dxy = await dxy_task
         ust10 = await ust10_task
+        gold = await gold_task
+        sp500 = await sp500_task
 
-    frames = [cg_data, cm_data, walcl, dxy, ust10]
+        walcl.columns = ["fed_liq"]
+        ecb.columns = ["ecb_liq"]
+        dxy.columns = ["dxy"]
+        ust10.columns = ["ust10"]
+        gold.columns = ["gold_price"]
+        sp500.columns = ["spx_index"]
+
+    frames = [cg_data, cm_data, walcl, ecb, dxy, ust10, gold, sp500]
     df = pd.concat(frames, axis=1)
     if "volume" in df.columns:
         df = df.drop(columns=["volume"])

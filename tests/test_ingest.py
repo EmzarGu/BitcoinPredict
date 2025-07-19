@@ -49,3 +49,16 @@ async def test_schema_columns(monkeypatch):
 
     df = await ingest.ingest_weekly()
     assert list(df.columns) == ingest.SCHEMA_COLUMNS
+    expected_one_cols = [
+        "realised_price",
+        "nupl",
+        "fed_liq",
+        "ecb_liq",
+        "dxy",
+        "ust10",
+        "gold_price",
+        "spx_index",
+    ]
+    for col in expected_one_cols:
+        assert df.loc[0, col] == 1
+    assert df.loc[0, "close_usd"] == 10
