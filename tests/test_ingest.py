@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
+import warnings
 
 import httpx
 from src import ingest
@@ -141,7 +142,11 @@ async def test_ingest_weekly_fred_failure(monkeypatch):
     monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
     monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
 
-    df = await ingest.ingest_weekly()
+    with pd.option_context("future.no_silent_downcasting", True):
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("error")
+            df = await ingest.ingest_weekly()
+    assert len(w) == 0
     assert pd.isna(df.loc[0, "fed_liq"])
 
 

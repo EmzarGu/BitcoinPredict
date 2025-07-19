@@ -214,6 +214,7 @@ async def ingest_weekly() -> pd.DataFrame:
     if "volume" in df.columns:
         df = df.drop(columns=["volume"])
     df = df.sort_index().ffill()
+    df = df.infer_objects(copy=False)
     df.index.name = "date"
     df_weekly = (
         df.resample("W-MON", label="left", closed="left").last().reset_index()
