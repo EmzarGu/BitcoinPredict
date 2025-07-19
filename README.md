@@ -19,3 +19,15 @@ Execute the test suite with:
 ```bash
 pytest -q
 ```
+
+## Database configuration
+Set the `DATABASE_URL` environment variable to enable writing to your
+PostgreSQL/TimescaleDB instance. The value should be a standard PostgreSQL
+connection string. For example:
+
+```bash
+export DATABASE_URL="postgresql://user:password@localhost:5432/bitcoin"
+```
+
+If this variable is not set, the ingestion script will skip the database upsert
+step.
