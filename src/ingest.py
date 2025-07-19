@@ -127,23 +127,24 @@ async def _fetch_yahoo_gold() -> pd.DataFrame:
         empty_index = pd.DatetimeIndex([], tz="UTC")
         return pd.DataFrame(columns=["gold_price"], index=empty_index)
 
-    if "Adj Close" not in raw.columns and "Close" not in raw.columns:
-        logger.warning("Yahoo Finance data missing Adj Close")
+    # Flatten MultiIndex columns from yfinance (e.g. ('Adj Close', 'GC=F'))
+    if isinstance(raw.columns, pd.MultiIndex):
+        raw.columns = raw.columns.droplevel(1)
+
+    price_col = None
+    if "Adj Close" in raw.columns:
+        price_col = "Adj Close"
+    elif "Close" in raw.columns:
+        price_col = "Close"
+    if price_col is None:
+        logger.warning("Yahoo Finance data missing Close column")
         empty_index = pd.DatetimeIndex([], tz="UTC")
         return pd.DataFrame(columns=["gold_price"], index=empty_index)
 
-    df = raw.reset_index()
-    date_col = df.columns[0]
-    df = df.rename(
-        columns={
-            date_col: "Date",
-            "Adj Close": "gold_price",
-            "Close": "gold_price",
-        }
-    )
-    df["Date"] = pd.to_datetime(df["Date"], utc=True)
+    series = raw[price_col].rename("gold_price")
+    series.index = pd.to_datetime(series.index, utc=True)
     df = (
-        df.set_index("Date")[["gold_price"]]
+        series.to_frame()
         .resample("W-MON", label="left", closed="left")
         .last()
     )
