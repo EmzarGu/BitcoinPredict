@@ -64,6 +64,13 @@ def _coingecko_to_weekly(data: Dict[str, Any]) -> pd.DataFrame:
         .resample("W-MON", label="left", closed="left")
         .agg({"price": "last", "volume": "sum"})
     )
+    logger.info("Fetched %s rows for coingecko", len(df))
+    if df.empty:
+        stub = pd.DataFrame(
+            {"close_usd": [pd.NA], "volume": [pd.NA]},
+            index=[pd.Timestamp.utcnow().normalize()],
+        )
+        return stub
     return df.rename(columns={"price": "close_usd"})
 
 
@@ -90,6 +97,13 @@ async def _fetch_coinmetrics(
     df = df.set_index("date").resample("W-MON", label="left", closed="left").last()
     df["realised_price"] = df["CapRealUSD"] / df["SplyCur"]
     df["nupl"] = (df["CapMrktCurUSD"] - df["CapRealUSD"]) / df["CapMrktCurUSD"]
+    logger.info("Fetched %s rows for CoinMetrics", len(df))
+    if df.empty:
+        stub = pd.DataFrame(
+            {"realised_price": [pd.NA], "nupl": [pd.NA]},
+            index=[pd.Timestamp.utcnow().normalize()],
+        )
+        return stub
     return df[["realised_price", "nupl"]]
 
 
@@ -112,12 +126,22 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.Da
         .resample("W-MON", label="left", closed="left")
         .last()
     )
+    logger.info("Fetched %s rows for %s", len(df), series_id)
+    if df.empty:
+        stub = pd.DataFrame(
+            {column_name: [pd.NA]},
+            index=[pd.Timestamp.utcnow().normalize()],
+        )
+        return stub
     return df[[column_name]]
 
 
 async def ingest_weekly() -> pd.DataFrame:
-    """Fetch raw data for the current ISO week, aggregate to weekly,
-    and upsert/insert into the TimescaleDB hypertable `btc_weekly`.
+    """Fetch raw data for the current ISO week and aggregate to weekly.
+
+    Missing values are forward-filled so the returned dataframe always has one
+    row for the current week. The function never raises and will skip the
+    database step if ``DATABASE_URL`` is not configured.
 
     Returns:
         pd.DataFrame: One-row DataFrame for the current week.
@@ -152,8 +176,16 @@ async def ingest_weekly() -> pd.DataFrame:
     df = pd.concat(frames, axis=1)
     if "volume" in df.columns:
         df = df.drop(columns=["volume"])
-    row = df.loc[[week_start]] if week_start in df.index else df.tail(1)
-    row = row.copy().reset_index().rename(columns={"index": "week_start"})
+    df = df.sort_index().ffill()
+    df.index.name = "date"
+    df_weekly = (
+        df.resample("W-MON", label="left", closed="left").last().reset_index()
+    )
+    df_weekly["week_start"] = df_weekly["date"].dt.normalize()
+    row = df_weekly[df_weekly["week_start"] == week_start]
+    if row.empty:
+        row = df_weekly.tail(1)
+    row = row.copy().drop(columns=["date"])
 
     for col in SCHEMA_COLUMNS:
         if col not in row.columns:
