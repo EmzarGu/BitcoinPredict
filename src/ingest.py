@@ -35,8 +35,11 @@ FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 # Mapping of FRED series IDs to dataframe column names
 FRED_COLUMN_MAP = {
     "WALCL": "fed_liq",
+    "ECBASSETS": "ecb_liq",
     "DTWEXBGS": "dxy",
     "DGS10": "ust10",
+    "GOLDAMGBD228NLBM": "gold_price",
+    "SP500": "spx_index",
 }
 
 
@@ -92,11 +95,15 @@ async def _fetch_coinmetrics(
 
 async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.DataFrame:
     url = FRED_URL.format(series_id=series_id)
-    resp = await client.get(url, timeout=30)
-    resp.raise_for_status()
+    column_name = FRED_COLUMN_MAP.get(series_id, series_id.lower())
+    try:
+        resp = await client.get(url, timeout=30)
+        resp.raise_for_status()
+    except httpx.HTTPStatusError:
+        logger.warning("Failed to fetch FRED series %s", series_id)
+        return pd.DataFrame(columns=[column_name])
     df = pd.read_csv(io.StringIO(resp.text))
     df.columns = [c.lower() for c in df.columns]
-    column_name = FRED_COLUMN_MAP.get(series_id, series_id.lower())
     # Rename the first column to "date" since FRED uses "observation_date"
     df.rename(columns={df.columns[0]: "date", df.columns[1]: column_name}, inplace=True)
     df["date"] = pd.to_datetime(df["date"], utc=True)
@@ -125,6 +132,7 @@ async def ingest_weekly() -> pd.DataFrame:
         cg_task = asyncio.create_task(_fetch_coingecko(client))
         cm_task = asyncio.create_task(_fetch_coinmetrics(client))
         fed_liq_task = asyncio.create_task(_fetch_fred_series(client, "WALCL"))
+        ecb_liq_task = asyncio.create_task(_fetch_fred_series(client, "ECBASSETS"))
         dxy_task = asyncio.create_task(_fetch_fred_series(client, "DTWEXBGS"))
         ust10_task = asyncio.create_task(_fetch_fred_series(client, "DGS10"))
         gold_task = asyncio.create_task(
@@ -135,11 +143,12 @@ async def ingest_weekly() -> pd.DataFrame:
         cg_data = _coingecko_to_weekly(await cg_task)
         cm_data = await cm_task
         fed_liq = await fed_liq_task
+        ecb_liq = await ecb_liq_task
         dxy = await dxy_task
         ust10 = await ust10_task
         gold = await gold_task
         sp500 = await sp500_task
-    frames = [cg_data, cm_data, fed_liq, dxy, ust10]
+    frames = [cg_data, cm_data, fed_liq, ecb_liq, dxy, ust10, gold, sp500]
     df = pd.concat(frames, axis=1)
     if "volume" in df.columns:
         df = df.drop(columns=["volume"])
