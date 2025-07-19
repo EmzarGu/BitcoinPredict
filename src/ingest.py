@@ -127,13 +127,18 @@ async def ingest_weekly() -> pd.DataFrame:
         fed_liq_task = asyncio.create_task(_fetch_fred_series(client, "WALCL"))
         dxy_task = asyncio.create_task(_fetch_fred_series(client, "DTWEXBGS"))
         ust10_task = asyncio.create_task(_fetch_fred_series(client, "DGS10"))
+        gold_task = asyncio.create_task(
+            _fetch_fred_series(client, "GOLDAMGBD228NLBM")
+        )
+        sp500_task = asyncio.create_task(_fetch_fred_series(client, "SP500"))
 
         cg_data = _coingecko_to_weekly(await cg_task)
         cm_data = await cm_task
         fed_liq = await fed_liq_task
         dxy = await dxy_task
         ust10 = await ust10_task
-
+        gold = await gold_task
+        sp500 = await sp500_task
     frames = [cg_data, cm_data, fed_liq, dxy, ust10]
     df = pd.concat(frames, axis=1)
     if "volume" in df.columns:
