@@ -115,7 +115,8 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.Da
         resp.raise_for_status()
     except httpx.HTTPStatusError:
         logger.warning("Failed to fetch FRED series %s", series_id)
-        return pd.DataFrame(columns=[column_name])
+        empty_index = pd.DatetimeIndex([], tz="UTC")
+        return pd.DataFrame(columns=[column_name], index=empty_index)
     df = pd.read_csv(io.StringIO(resp.text))
     df.columns = [c.lower() for c in df.columns]
     # Rename the first column to "date" since FRED uses "observation_date"

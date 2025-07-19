@@ -89,3 +89,29 @@ async def test_fetch_fred_series_error(monkeypatch):
     df = await ingest._fetch_fred_series(FakeClient(), "WALCL")
     assert list(df.columns) == ["fed_liq"]
     assert df.empty
+    assert isinstance(df.index, pd.DatetimeIndex)
+    assert df.index.tz == timezone.utc
+
+
+@pytest.mark.asyncio
+async def test_ingest_weekly_fred_failure(monkeypatch):
+    week_start = pd.Timestamp("2024-01-01", tz="UTC")
+
+    async def fake_fetch_coingecko(client):
+        ts = int(week_start.timestamp() * 1000)
+        return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
+
+    async def fake_fetch_coinmetrics(client):
+        df = pd.DataFrame({"realised_price": [1], "nupl": [0]}, index=[week_start])
+        return df
+
+    async def fake_fetch_fred_series(client, series_id):
+        col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
+        return pd.DataFrame(columns=[col], index=pd.DatetimeIndex([], tz="UTC"))
+
+    monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
+    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
+    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+
+    df = await ingest.ingest_weekly()
+    assert pd.isna(df.loc[0, "fed_liq"])
