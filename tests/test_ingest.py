@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 import pandas as pd
 import pytest
 
+import httpx
 from src import ingest
 
 
@@ -48,8 +49,11 @@ async def test_schema_columns(monkeypatch):
     df = await ingest.ingest_weekly()
     assert list(df.columns) == ingest.SCHEMA_COLUMNS
     assert df.loc[0, "fed_liq"] == 1
+    assert df.loc[0, "ecb_liq"] == 1
     assert df.loc[0, "dxy"] == 1
     assert df.loc[0, "ust10"] == 1
+    assert df.loc[0, "gold_price"] == 1
+    assert df.loc[0, "spx_index"] == 1
 
 
 @pytest.mark.asyncio
@@ -70,3 +74,18 @@ async def test_fetch_fred_series(monkeypatch):
     df = await ingest._fetch_fred_series(FakeClient(), "WALCL")
     assert list(df.columns) == ["fed_liq"]
     assert df.iloc[0]["fed_liq"] == 10
+
+
+@pytest.mark.asyncio
+async def test_fetch_fred_series_error(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("error", request=None, response=self)
+
+    class FakeClient:
+        async def get(self, url, timeout=30):
+            return FakeResponse()
+
+    df = await ingest._fetch_fred_series(FakeClient(), "WALCL")
+    assert list(df.columns) == ["fed_liq"]
+    assert df.empty
