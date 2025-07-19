@@ -29,8 +29,12 @@ SCHEMA_COLUMNS: List[str] = [
 ]
 
 COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-LOOKINTO_RP = "https://www.lookintobitcoin.com/bitcoin-realised-price.csv"
-LOOKINTO_NUPL = "https://www.lookintobitcoin.com/net-unrealized-profit-loss.csv"
+LOOKINTO_RP = (
+    "https://www.bitcoinmagazinepro.com/bitcoin-realised-price.csv"
+)
+LOOKINTO_NUPL = (
+    "https://www.bitcoinmagazinepro.com/net-unrealized-profit-loss.csv"
+)
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 
 
@@ -105,7 +109,7 @@ async def ingest_weekly() -> pd.DataFrame:
         hour=0, minute=0, second=0, microsecond=0
     )
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(follow_redirects=True) as client:
         cg_task = asyncio.create_task(_fetch_coingecko(client))
         rp_task = asyncio.create_task(_fetch_csv(client, LOOKINTO_RP, "realised_price"))
         nupl_task = asyncio.create_task(_fetch_csv(client, LOOKINTO_NUPL, "nupl"))
