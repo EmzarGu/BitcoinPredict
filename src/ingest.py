@@ -32,6 +32,13 @@ COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
 COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 
+# Mapping of FRED series IDs to dataframe column names
+FRED_COLUMN_MAP = {
+    "WALCL": "fed_liq",
+    "DTWEXBGS": "dxy",
+    "DGS10": "ust10",
+}
+
 
 async def _fetch_coingecko(client: httpx.AsyncClient, days: int = 8) -> Dict[str, Any]:
     resp = await client.get(
@@ -89,18 +96,16 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.Da
     resp.raise_for_status()
     df = pd.read_csv(io.StringIO(resp.text))
     df.columns = [c.lower() for c in df.columns]
+    column_name = FRED_COLUMN_MAP.get(series_id, series_id.lower())
     # Rename the first column to "date" since FRED uses "observation_date"
-    df.rename(
-        columns={df.columns[0]: "date", df.columns[1]: series_id.lower()},
-        inplace=True,
-    )
+    df.rename(columns={df.columns[0]: "date", df.columns[1]: column_name}, inplace=True)
     df["date"] = pd.to_datetime(df["date"], utc=True)
     df = (
         df.set_index("date")
         .resample("W-MON", label="left", closed="left")
         .last()
     )
-    return df[[series_id.lower()]]
+    return df[[column_name]]
 
 
 async def ingest_weekly() -> pd.DataFrame:
@@ -119,10 +124,7 @@ async def ingest_weekly() -> pd.DataFrame:
     async with httpx.AsyncClient(follow_redirects=True) as client:
         cg_task = asyncio.create_task(_fetch_coingecko(client))
         cm_task = asyncio.create_task(_fetch_coinmetrics(client))
-        walcl_task = asyncio.create_task(_fetch_fred_series(client, "WALCL"))
-        ecb_task = asyncio.create_task(
-            _fetch_fred_series(client, "ECBASSETS")
-        )
+        fed_liq_task = asyncio.create_task(_fetch_fred_series(client, "WALCL"))
         dxy_task = asyncio.create_task(_fetch_fred_series(client, "DTWEXBGS"))
         ust10_task = asyncio.create_task(_fetch_fred_series(client, "DGS10"))
         gold_task = asyncio.create_task(
@@ -132,21 +134,12 @@ async def ingest_weekly() -> pd.DataFrame:
 
         cg_data = _coingecko_to_weekly(await cg_task)
         cm_data = await cm_task
-        walcl = await walcl_task
-        ecb = await ecb_task
+        fed_liq = await fed_liq_task
         dxy = await dxy_task
         ust10 = await ust10_task
         gold = await gold_task
         sp500 = await sp500_task
-
-        walcl.columns = ["fed_liq"]
-        ecb.columns = ["ecb_liq"]
-        dxy.columns = ["dxy"]
-        ust10.columns = ["ust10"]
-        gold.columns = ["gold_price"]
-        sp500.columns = ["spx_index"]
-
-    frames = [cg_data, cm_data, walcl, ecb, dxy, ust10, gold, sp500]
+    frames = [cg_data, cm_data, fed_liq, dxy, ust10]
     df = pd.concat(frames, axis=1)
     if "volume" in df.columns:
         df = df.drop(columns=["volume"])

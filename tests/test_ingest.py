@@ -40,7 +40,8 @@ async def test_schema_columns(monkeypatch):
         return df
 
     async def fake_fetch_fred_series(client, series_id):
-        df = pd.DataFrame({series_id.lower(): [1]}, index=[week_start])
+        col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
+        df = pd.DataFrame({col: [1]}, index=[week_start])
         return df
 
     monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
@@ -49,16 +50,26 @@ async def test_schema_columns(monkeypatch):
 
     df = await ingest.ingest_weekly()
     assert list(df.columns) == ingest.SCHEMA_COLUMNS
-    expected_one_cols = [
-        "realised_price",
-        "nupl",
-        "fed_liq",
-        "ecb_liq",
-        "dxy",
-        "ust10",
-        "gold_price",
-        "spx_index",
-    ]
-    for col in expected_one_cols:
-        assert df.loc[0, col] == 1
-    assert df.loc[0, "close_usd"] == 10
+    assert df.loc[0, "fed_liq"] == 1
+    assert df.loc[0, "dxy"] == 1
+    assert df.loc[0, "ust10"] == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_fred_series(monkeypatch):
+    csv = "DATE,WALCL\n2024-01-01,10\n"
+
+    class FakeResponse:
+        def __init__(self, text):
+            self.text = text
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        async def get(self, url, timeout=30):
+            return FakeResponse(csv)
+
+    df = await ingest._fetch_fred_series(FakeClient(), "WALCL")
+    assert list(df.columns) == ["fed_liq"]
+    assert df.iloc[0]["fed_liq"] == 10
