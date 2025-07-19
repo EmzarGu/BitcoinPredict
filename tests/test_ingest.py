@@ -115,3 +115,51 @@ async def test_ingest_weekly_fred_failure(monkeypatch):
 
     df = await ingest.ingest_weekly()
     assert pd.isna(df.loc[0, "fed_liq"])
+
+
+@pytest.mark.asyncio
+async def test_fetch_stooq_gold_price(monkeypatch):
+    csv = (
+        "Date,Open,High,Low,Close,Volume\n"
+        "2024-01-01,1,2,3,4,10\n"
+        "2024-01-02,2,3,4,5,10\n"
+    )
+
+    class FakeResponse:
+        def __init__(self, text):
+            self.text = text
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        async def get(self, url, timeout=30):
+            return FakeResponse(csv)
+
+    df = await ingest._fetch_stooq_gold_price(FakeClient())
+    assert list(df.columns) == ["gold_price"]
+    assert df.index.tz == timezone.utc
+    assert df.iloc[0]["gold_price"] == 5
+
+
+@pytest.mark.asyncio
+async def test_fred_fallback_to_stooq(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("error", request=None, response=self)
+
+    class FakeClient:
+        async def get(self, url, timeout=30):
+            return FakeResponse()
+
+    async def fake_stooq(client):
+        df = pd.DataFrame(
+            {"gold_price": [7]}, index=[pd.Timestamp("2024-01-01", tz="UTC")]
+        )
+        return df
+
+    monkeypatch.setattr(ingest, "_fetch_stooq_gold_price", fake_stooq)
+
+    df = await ingest._fetch_fred_series(FakeClient(), "GOLDAMGBD228NLBM")
+    assert list(df.columns) == ["gold_price"]
+    assert df.iloc[0]["gold_price"] == 7

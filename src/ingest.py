@@ -32,6 +32,8 @@ COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
 COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 
+STOOQ_GOLD_URL = "https://stooq.com/q/d/l/?s=xau_usd&i=d"
+
 # Mapping of FRED series IDs to dataframe column names
 FRED_COLUMN_MAP = {
     "WALCL": "fed_liq",
@@ -107,6 +109,35 @@ async def _fetch_coinmetrics(
     return df[["realised_price", "nupl"]]
 
 
+async def _fetch_stooq_gold_price(client: httpx.AsyncClient) -> pd.DataFrame:
+    """Fetch daily gold price from Stooq and resample to weekly."""
+    try:
+        resp = await client.get(STOOQ_GOLD_URL, timeout=30)
+        resp.raise_for_status()
+    except httpx.HTTPStatusError:
+        logger.warning("Failed to fetch gold price from Stooq")
+        empty_index = pd.DatetimeIndex([], tz="UTC")
+        return pd.DataFrame(columns=["gold_price"], index=empty_index)
+
+    df = pd.read_csv(io.StringIO(resp.text))
+    df.columns = [c.lower() for c in df.columns]
+    df.rename(columns={"close": "gold_price"}, inplace=True)
+    df["date"] = pd.to_datetime(df["date"], utc=True)
+    df = (
+        df.set_index("date")
+        .resample("W-MON", label="left", closed="left")
+        .last()
+    )
+    logger.info("Fetched %s rows for Stooq gold price", len(df))
+    if df.empty:
+        stub = pd.DataFrame(
+            {"gold_price": [pd.NA]},
+            index=[pd.Timestamp.utcnow().normalize()],
+        )
+        return stub
+    return df[["gold_price"]]
+
+
 async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.DataFrame:
     url = FRED_URL.format(series_id=series_id)
     column_name = FRED_COLUMN_MAP.get(series_id, series_id.lower())
@@ -115,6 +146,8 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.Da
         resp.raise_for_status()
     except httpx.HTTPStatusError:
         logger.warning("Failed to fetch FRED series %s", series_id)
+        if series_id == "GOLDAMGBD228NLBM":
+            return await _fetch_stooq_gold_price(client)
         empty_index = pd.DatetimeIndex([], tz="UTC")
         return pd.DataFrame(columns=[column_name], index=empty_index)
     df = pd.read_csv(io.StringIO(resp.text))
