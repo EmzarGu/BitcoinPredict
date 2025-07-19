@@ -122,6 +122,12 @@ async def _fetch_stooq_gold_price(client: httpx.AsyncClient) -> pd.DataFrame:
 
     df = pd.read_csv(io.StringIO(resp.text))
     df.columns = [c.lower() for c in df.columns]
+
+    if "date" not in df.columns or "close" not in df.columns:
+        logger.warning("Stooq CSV missing required columns")
+        empty_index = pd.DatetimeIndex([], tz="UTC")
+        return pd.DataFrame(columns=["gold_price"], index=empty_index)
+
     df.rename(columns={"close": "gold_price"}, inplace=True)
     df["date"] = pd.to_datetime(df["date"], utc=True)
     df = (

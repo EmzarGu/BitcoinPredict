@@ -176,6 +176,25 @@ async def test_fetch_stooq_gold_price(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_stooq_gold_price_invalid(monkeypatch):
+    class FakeResponse:
+        def __init__(self, text):
+            self.text = text
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        async def get(self, url, timeout=30):
+            return FakeResponse("No data")
+
+    df = await ingest._fetch_stooq_gold_price(FakeClient())
+    assert list(df.columns) == ["gold_price"]
+    assert df.empty
+    assert df.index.tz == timezone.utc
+
+
+@pytest.mark.asyncio
 async def test_fred_fallback_to_stooq(monkeypatch):
     class FakeResponse:
         def raise_for_status(self):
