@@ -156,6 +156,7 @@ async def test_fetch_yahoo_gold(monkeypatch):
         {"Adj Close": [4, 5]},
         index=[pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")],
     )
+    df_raw.index.name = "Date"
 
     def fake_download(*args, **kwargs):
         return df_raw
@@ -171,7 +172,9 @@ async def test_fetch_yahoo_gold(monkeypatch):
 @pytest.mark.asyncio
 async def test_fetch_yahoo_gold_invalid(monkeypatch):
     def fake_download(*args, **kwargs):
-        return pd.DataFrame({"Close": [1]}, index=[pd.Timestamp("2024-01-01")])
+        df = pd.DataFrame({"Open": [1]}, index=[pd.Timestamp("2024-01-01")])
+        df.index.name = "Date"
+        return df
 
     monkeypatch.setattr(ingest.yf, "download", fake_download)
 
