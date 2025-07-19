@@ -146,9 +146,7 @@ async def ingest_weekly() -> pd.DataFrame:
         logger.warning("DATABASE_URL not set; skipping DB upsert")
     else:
         conn = psycopg2.connect(database_url)
-        values = [tuple(row.iloc[0])]
         columns = ",".join(SCHEMA_COLUMNS)
-        placeholders = ",".join([f"%({c})s" for c in SCHEMA_COLUMNS])
         update = ",".join([f"{c} = EXCLUDED.{c}" for c in SCHEMA_COLUMNS[1:]])
         with conn, conn.cursor() as cur:
             psycopg2.extras.execute_values(
