@@ -32,8 +32,11 @@ async def test_schema_columns(monkeypatch):
             "total_volumes": [[int(week_start.timestamp() * 1000), 1]],
         }
 
-    async def fake_fetch_csv(client, url, column):
-        df = pd.DataFrame({column: [1]}, index=[week_start])
+    async def fake_fetch_coinmetrics(client):
+        df = pd.DataFrame({
+            "realised_price": [1],
+            "nupl": [1],
+        }, index=[week_start])
         return df
 
     async def fake_fetch_fred_series(client, series_id):
@@ -41,7 +44,7 @@ async def test_schema_columns(monkeypatch):
         return df
 
     monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
-    monkeypatch.setattr(ingest, "_fetch_csv", fake_fetch_csv)
+    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
     monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
 
     df = await ingest.ingest_weekly()

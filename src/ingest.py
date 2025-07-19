@@ -29,12 +29,7 @@ SCHEMA_COLUMNS: List[str] = [
 ]
 
 COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-LOOKINTO_RP = (
-    "https://www.bitcoinmagazinepro.com/bitcoin-realised-price.csv"
-)
-LOOKINTO_NUPL = (
-    "https://www.bitcoinmagazinepro.com/net-unrealized-profit-loss.csv"
-)
+COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 
 
@@ -62,22 +57,30 @@ def _coingecko_to_weekly(data: Dict[str, Any]) -> pd.DataFrame:
     return df.rename(columns={"price": "close_usd"})
 
 
-async def _fetch_csv(client: httpx.AsyncClient, url: str, column: str) -> pd.DataFrame:
-    resp = await client.get(url, timeout=30)
+async def _fetch_coinmetrics(
+    client: httpx.AsyncClient, days: int = 8
+) -> pd.DataFrame:
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    params = {
+        "assets": "btc",
+        "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD",
+        "frequency": "1d",
+        "start_time": start.strftime("%Y-%m-%d"),
+        "end_time": end.strftime("%Y-%m-%d"),
+    }
+    resp = await client.get(COINMETRICS_URL, params=params, timeout=30)
     resp.raise_for_status()
-    df = pd.read_csv(io.StringIO(resp.text))
-    df.columns = [c.lower() for c in df.columns]
-    if "date" not in df.columns:
-        df.rename(columns={df.columns[0]: "date"}, inplace=True)
-    if column not in df.columns:
-        df.rename(columns={df.columns[-1]: column}, inplace=True)
-    df["date"] = pd.to_datetime(df["date"], utc=True)
-    df = (
-        df.set_index("date")
-        .resample("W-MON", label="left", closed="left")
-        .last()
-    )
-    return df[[column]]
+    data = resp.json().get("data", [])
+    df = pd.DataFrame(data)
+    for col in ["CapRealUSD", "SplyCur", "CapMrktCurUSD"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    df["date"] = pd.to_datetime(df["time"], utc=True)
+    df = df.set_index("date").resample("W-MON", label="left", closed="left").last()
+    df["realised_price"] = df["CapRealUSD"] / df["SplyCur"]
+    df["nupl"] = (df["CapMrktCurUSD"] - df["CapRealUSD"]) / df["CapMrktCurUSD"]
+    return df[["realised_price", "nupl"]]
 
 
 async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.DataFrame:
@@ -111,20 +114,18 @@ async def ingest_weekly() -> pd.DataFrame:
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         cg_task = asyncio.create_task(_fetch_coingecko(client))
-        rp_task = asyncio.create_task(_fetch_csv(client, LOOKINTO_RP, "realised_price"))
-        nupl_task = asyncio.create_task(_fetch_csv(client, LOOKINTO_NUPL, "nupl"))
+        cm_task = asyncio.create_task(_fetch_coinmetrics(client))
         walcl_task = asyncio.create_task(_fetch_fred_series(client, "WALCL"))
         dxy_task = asyncio.create_task(_fetch_fred_series(client, "DTWEXBGS"))
         ust10_task = asyncio.create_task(_fetch_fred_series(client, "DGS10"))
 
         cg_data = _coingecko_to_weekly(await cg_task)
-        realised = await rp_task
-        nupl = await nupl_task
+        cm_data = await cm_task
         walcl = await walcl_task
         dxy = await dxy_task
         ust10 = await ust10_task
 
-    frames = [cg_data, realised, nupl, walcl, dxy, ust10]
+    frames = [cg_data, cm_data, walcl, dxy, ust10]
     df = pd.concat(frames, axis=1)
     if "volume" in df.columns:
         df = df.drop(columns=["volume"])
