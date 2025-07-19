@@ -31,6 +31,7 @@ SCHEMA_COLUMNS: List[str] = [
 COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
 COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+FRED_API_KEY = os.getenv("FRED_API_KEY")
 
 STOOQ_GOLD_URL = "https://stooq.com/q/d/l/?s=xau_usd&i=d"
 
@@ -140,6 +141,8 @@ async def _fetch_stooq_gold_price(client: httpx.AsyncClient) -> pd.DataFrame:
 
 async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.DataFrame:
     url = FRED_URL.format(series_id=series_id)
+    if FRED_API_KEY:
+        url += f"&api_key={FRED_API_KEY}"
     column_name = FRED_COLUMN_MAP.get(series_id, series_id.lower())
     try:
         resp = await client.get(url, timeout=30)
