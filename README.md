@@ -31,3 +31,13 @@ export DATABASE_URL="postgresql://user:password@localhost:5432/bitcoin"
 
 If this variable is not set, the ingestion script will skip the database upsert
 step.
+
+## FRED API access
+Some economic series fetched from FRED may not be available via the simple CSV endpoint used by the ingestor.
+For those series you can provide a personal FRED API key through the `FRED_API_KEY` environment variable:
+
+```bash
+export FRED_API_KEY="your_fred_key"
+```
+
+When a requested series cannot be retrieved (for example if the key is missing or the API returns an error), the script continues and the affected column will be filled with `NA` values.
