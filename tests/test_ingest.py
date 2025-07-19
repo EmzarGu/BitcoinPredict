@@ -151,51 +151,38 @@ async def test_ingest_weekly_fred_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fetch_stooq_gold_price(monkeypatch):
-    csv = (
-        "Date,Open,High,Low,Close,Volume\n"
-        "2024-01-01,1,2,3,4,10\n"
-        "2024-01-02,2,3,4,5,10\n"
+async def test_fetch_yahoo_gold(monkeypatch):
+    df_raw = pd.DataFrame(
+        {"Adj Close": [4, 5]},
+        index=[pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")],
     )
 
-    class FakeResponse:
-        def __init__(self, text):
-            self.text = text
+    def fake_download(*args, **kwargs):
+        return df_raw
 
-        def raise_for_status(self):
-            pass
+    monkeypatch.setattr(ingest.yf, "download", fake_download)
 
-    class FakeClient:
-        async def get(self, url, timeout=30):
-            return FakeResponse(csv)
-
-    df = await ingest._fetch_stooq_gold_price(FakeClient())
+    df = await ingest._fetch_yahoo_gold()
     assert list(df.columns) == ["gold_price"]
     assert df.index.tz == timezone.utc
     assert df.iloc[0]["gold_price"] == 5
 
 
 @pytest.mark.asyncio
-async def test_fetch_stooq_gold_price_invalid(monkeypatch):
-    class FakeResponse:
-        def __init__(self, text):
-            self.text = text
+async def test_fetch_yahoo_gold_invalid(monkeypatch):
+    def fake_download(*args, **kwargs):
+        return pd.DataFrame({"Close": [1]}, index=[pd.Timestamp("2024-01-01")])
 
-        def raise_for_status(self):
-            pass
+    monkeypatch.setattr(ingest.yf, "download", fake_download)
 
-    class FakeClient:
-        async def get(self, url, timeout=30):
-            return FakeResponse("No data")
-
-    df = await ingest._fetch_stooq_gold_price(FakeClient())
+    df = await ingest._fetch_yahoo_gold()
     assert list(df.columns) == ["gold_price"]
     assert df.empty
     assert df.index.tz == timezone.utc
 
 
 @pytest.mark.asyncio
-async def test_fred_fallback_to_stooq(monkeypatch):
+async def test_fred_fallback_to_yahoo(monkeypatch):
     class FakeResponse:
         def raise_for_status(self):
             raise httpx.HTTPStatusError("error", request=None, response=self)
@@ -204,13 +191,13 @@ async def test_fred_fallback_to_stooq(monkeypatch):
         async def get(self, url, timeout=30):
             return FakeResponse()
 
-    async def fake_stooq(client):
+    async def fake_yahoo():
         df = pd.DataFrame(
             {"gold_price": [7]}, index=[pd.Timestamp("2024-01-01", tz="UTC")]
         )
         return df
 
-    monkeypatch.setattr(ingest, "_fetch_stooq_gold_price", fake_stooq)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_yahoo)
 
     df = await ingest._fetch_fred_series(FakeClient(), "GOLDAMGBD228NLBM")
     assert list(df.columns) == ["gold_price"]
