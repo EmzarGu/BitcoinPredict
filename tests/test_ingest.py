@@ -1,12 +1,9 @@
-from pathlib import Path
-import sys
-sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from datetime import datetime, timezone
 
 import pandas as pd
 import pytest
 
-import src.ingest as ingest
+from src import ingest
 
 
 def test_coin_gecko_to_weekly():
