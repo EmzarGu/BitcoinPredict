@@ -9,6 +9,7 @@ import httpx
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+import yfinance as yf
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -33,7 +34,6 @@ COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metr
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 FRED_API_KEY = os.getenv("FRED_API_KEY")
 
-STOOQ_GOLD_URL = "https://stooq.com/q/d/l/?s=xau_usd&i=d"
 
 # Mapping of FRED series IDs to dataframe column names
 FRED_COLUMN_MAP = {
@@ -110,36 +110,39 @@ async def _fetch_coinmetrics(
     return df[["realised_price", "nupl"]]
 
 
-async def _fetch_stooq_gold_price(client: httpx.AsyncClient) -> pd.DataFrame:
-    """Fetch daily gold price from Stooq and resample to weekly."""
+
+
+async def _fetch_yahoo_gold() -> pd.DataFrame:
+    """Fetch daily gold price from Yahoo Finance and resample to weekly."""
     try:
-        resp = await client.get(STOOQ_GOLD_URL, timeout=30)
-        resp.raise_for_status()
-    except httpx.HTTPStatusError:
-        logger.warning("Failed to fetch gold price from Stooq")
+        raw = await asyncio.to_thread(
+            yf.download,
+            "GC=F",
+            period="1mo",
+            interval="1d",
+            auto_adjust=False,
+        )
+    except Exception:
+        logger.warning("Failed to fetch gold price from Yahoo Finance")
         empty_index = pd.DatetimeIndex([], tz="UTC")
         return pd.DataFrame(columns=["gold_price"], index=empty_index)
 
-    df = pd.read_csv(io.StringIO(resp.text))
-    df.columns = [c.lower() for c in df.columns]
-
-    if "date" not in df.columns or "close" not in df.columns:
-        logger.warning("Stooq CSV missing required columns")
+    if "Adj Close" not in raw.columns:
+        logger.warning("Yahoo Finance data missing Adj Close")
         empty_index = pd.DatetimeIndex([], tz="UTC")
         return pd.DataFrame(columns=["gold_price"], index=empty_index)
 
-    df.rename(columns={"close": "gold_price"}, inplace=True)
-    df["date"] = pd.to_datetime(df["date"], utc=True)
+    df = raw.rename(columns={"Adj Close": "gold_price"})
+    df.index = pd.to_datetime(df.index, utc=True)
     df = (
-        df.set_index("date")
+        df[["gold_price"]]
         .resample("W-MON", label="left", closed="left")
         .last()
     )
-    logger.info("Fetched %s rows for Stooq gold price", len(df))
+    logger.info("Fetched %s rows for Yahoo gold price", len(df))
     if df.empty:
         stub = pd.DataFrame(
-            {"gold_price": [pd.NA]},
-            index=[pd.Timestamp.utcnow().normalize()],
+            {"gold_price": [pd.NA]}, index=[pd.Timestamp.utcnow().normalize()]
         )
         return stub
     return df[["gold_price"]]
@@ -156,7 +159,7 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.Da
     except httpx.HTTPStatusError:
         logger.warning("Failed to fetch FRED series %s", series_id)
         if series_id == "GOLDAMGBD228NLBM":
-            return await _fetch_stooq_gold_price(client)
+            return await _fetch_yahoo_gold()
         empty_index = pd.DatetimeIndex([], tz="UTC")
         return pd.DataFrame(columns=[column_name], index=empty_index)
     df = pd.read_csv(io.StringIO(resp.text))
