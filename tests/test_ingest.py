@@ -77,6 +77,34 @@ async def test_fetch_fred_series(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_fred_series_with_api_key(monkeypatch):
+    csv = "DATE,WALCL\n2024-01-01,10\n"
+
+    class FakeResponse:
+        def __init__(self, text):
+            self.text = text
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        def __init__(self):
+            self.urls = []
+
+        async def get(self, url, timeout=30):
+            self.urls.append(url)
+            return FakeResponse(csv)
+
+    client = FakeClient()
+    monkeypatch.setattr(ingest, "FRED_API_KEY", "testkey")
+
+    df = await ingest._fetch_fred_series(client, "WALCL")
+    assert list(df.columns) == ["fed_liq"]
+    assert df.iloc[0]["fed_liq"] == 10
+    assert client.urls[0].endswith("&api_key=testkey")
+
+
+@pytest.mark.asyncio
 async def test_fetch_fred_series_error(monkeypatch):
     class FakeResponse:
         def raise_for_status(self):
