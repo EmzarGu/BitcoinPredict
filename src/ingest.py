@@ -89,7 +89,11 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.Da
     resp.raise_for_status()
     df = pd.read_csv(io.StringIO(resp.text))
     df.columns = [c.lower() for c in df.columns]
-    df.rename(columns={"date": "date", df.columns[1]: series_id.lower()}, inplace=True)
+    # Rename the first column to "date" since FRED uses "observation_date"
+    df.rename(
+        columns={df.columns[0]: "date", df.columns[1]: series_id.lower()},
+        inplace=True,
+    )
     df["date"] = pd.to_datetime(df["date"], utc=True)
     df = (
         df.set_index("date")
