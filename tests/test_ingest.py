@@ -26,13 +26,13 @@ def test_coin_gecko_to_weekly():
 async def test_schema_columns(monkeypatch):
     week_start = pd.Timestamp("2024-01-01", tz="UTC")
 
-    async def fake_fetch_coingecko(client):
+    async def fake_fetch_coingecko(client, *args, **kwargs):
         return {
             "prices": [[int(week_start.timestamp() * 1000), 10]],
             "total_volumes": [[int(week_start.timestamp() * 1000), 1]],
         }
 
-    async def fake_fetch_coinmetrics(client):
+    async def fake_fetch_coinmetrics(client, *args, **kwargs):
         df = pd.DataFrame({
             "realised_price": [1],
             "nupl": [1],
@@ -127,11 +127,11 @@ async def test_fetch_fred_series_error(monkeypatch):
 async def test_ingest_weekly_fred_failure(monkeypatch):
     week_start = pd.Timestamp("2024-01-01", tz="UTC")
 
-    async def fake_fetch_coingecko(client):
+    async def fake_fetch_coingecko(client, *args, **kwargs):
         ts = int(week_start.timestamp() * 1000)
         return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
 
-    async def fake_fetch_coinmetrics(client):
+    async def fake_fetch_coinmetrics(client, *args, **kwargs):
         df = pd.DataFrame({"realised_price": [1], "nupl": [0]}, index=[week_start])
         return df
 
@@ -214,11 +214,11 @@ async def test_ingest_weekly_db_upsert(monkeypatch):
 
     week_start = pd.Timestamp("2024-01-01", tz="UTC")
 
-    async def fake_fetch_coingecko(client):
+    async def fake_fetch_coingecko(client, *args, **kwargs):
         ts = int(week_start.timestamp() * 1000)
         return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
 
-    async def fake_fetch_coinmetrics(client):
+    async def fake_fetch_coinmetrics(client, *args, **kwargs):
         df = pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[week_start])
         return df
 
@@ -282,10 +282,10 @@ async def test_ingest_weekly_db_upsert(monkeypatch):
 async def test_table_setup_called(monkeypatch):
     calls = []
 
-    async def fake_fetch_coingecko(client):
+    async def fake_fetch_coingecko(client, *args, **kwargs):
         return {"prices": [[0, 1]], "total_volumes": [[0, 1]]}
 
-    async def fake_fetch_coinmetrics(client):
+    async def fake_fetch_coinmetrics(client, *args, **kwargs):
         df = pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[pd.Timestamp.utcnow()])
         return df
 
