@@ -212,9 +212,14 @@ async def _fetch_yahoo_gold() -> pd.DataFrame:
     # selected name. In that case pick the first column to obtain a Series.
     if isinstance(series, pd.DataFrame):
         series = series.iloc[:, 0]
-    series = series.rename("gold_price")
+    series.name = "gold_price"
     series.index = pd.to_datetime(series.index, utc=True)
-    df = pd.DataFrame(series).resample("W-MON", label="left", closed="left").last()
+    df = (
+        series
+        .resample("W-MON", label="left", closed="left")
+        .last()
+        .to_frame()
+    )
     logger.info("Fetched %s rows for Yahoo gold price", len(df))
     if df.empty:
         stub = pd.DataFrame(
@@ -272,9 +277,14 @@ async def _fetch_yahoo_btc(
     # the first column to obtain a Series in that case.
     if isinstance(series, pd.DataFrame):
         series = series.iloc[:, 0]
-    series = series.rename("close_usd")
+    series.name = "close_usd"
     series.index = pd.to_datetime(series.index, utc=True)
-    df = pd.DataFrame(series).resample("W-MON", label="left", closed="left").last()
+    df = (
+        series
+        .resample("W-MON", label="left", closed="left")
+        .last()
+        .to_frame()
+    )
     df["volume"] = pd.NA
     logger.info("Fetched %s rows for Yahoo BTC price", len(df))
     if df.empty:
