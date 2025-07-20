@@ -495,3 +495,61 @@ def test_create_table_if_missing(monkeypatch):
     ingest._create_table_if_missing(FakeConn())
 
     assert any("CREATE TABLE IF NOT EXISTS btc_weekly" in sql for sql in executed)
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_retry_request_error_empty_df(monkeypatch):
+    calls = 0
+
+    async def failing():
+        nonlocal calls
+        calls += 1
+        raise httpx.RequestError("boom", request=httpx.Request("GET", "http://x"))
+
+    async def fake_sleep(_):
+        pass
+
+    monkeypatch.setattr(ingest.asyncio, "sleep", fake_sleep)
+
+    df = await ingest._fetch_with_retry(
+        failing, name="coinmetrics", columns=["realised_price", "nupl"]
+    )
+
+    assert calls == 3
+    assert list(df.columns) == ["realised_price", "nupl"]
+    assert df.empty
+    assert isinstance(df.index, pd.DatetimeIndex)
+    assert df.index.tz == timezone.utc
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_retry_request_error_fallback(monkeypatch):
+    calls = 0
+    fallback_called = False
+
+    async def failing():
+        nonlocal calls
+        calls += 1
+        raise httpx.RequestError("boom", request=httpx.Request("GET", "http://x"))
+
+    async def fallback():
+        nonlocal fallback_called
+        fallback_called = True
+        return pd.DataFrame({"close_usd": [1]}, index=[pd.Timestamp("2024-01-01", tz="UTC")])
+
+    async def fake_sleep(_):
+        pass
+
+    monkeypatch.setattr(ingest.asyncio, "sleep", fake_sleep)
+
+    df = await ingest._fetch_with_retry(
+        failing,
+        name="coingecko",
+        columns=["close_usd"],
+        fallback=fallback,
+    )
+
+    assert calls == 3
+    assert fallback_called
+    assert not df.empty
+    assert df.iloc[0]["close_usd"] == 1

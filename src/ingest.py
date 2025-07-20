@@ -292,16 +292,23 @@ async def _fetch_with_retry(func, *, name: str, columns: List[str], fallback=Non
     for attempt in range(3):
         try:
             return await func()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            retryable = status >= 500 or (name == "coingecko" and status in (401, 429))
-            if not retryable:
-                raise
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            use_fallback = False
+            if isinstance(exc, httpx.HTTPStatusError):
+                status = exc.response.status_code
+                retryable = status >= 500 or (
+                    name == "coingecko" and status in (401, 429)
+                )
+                if not retryable:
+                    raise
+                use_fallback = name == "coingecko" and status in (401, 429) and fallback
+            else:  # httpx.RequestError
+                use_fallback = bool(fallback)
             if attempt < 2:
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
-            if name == "coingecko" and status in (401, 429) and fallback:
+            if use_fallback:
                 return await fallback()
             logger.warning("Failed to fetch %s after retries", name)
             empty_index = pd.DatetimeIndex([], tz="UTC")
