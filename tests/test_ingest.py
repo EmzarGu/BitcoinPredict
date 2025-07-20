@@ -5,6 +5,7 @@ import pytest
 import warnings
 
 import httpx
+import psycopg2
 from src import ingest
 
 
@@ -239,6 +240,9 @@ async def test_ingest_weekly_db_upsert(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             pass
 
+        def execute(self, sql):
+            pass
+
     class FakeConn:
         def cursor(self):
             return FakeCursor()
@@ -269,3 +273,94 @@ async def test_ingest_weekly_db_upsert(monkeypatch):
     assert captured["argslist"] and isinstance(captured["argslist"][0], dict)
     assert isinstance(captured.get("template"), str) and captured["template"]
     assert "%(week_start)s" in captured["template"]
+
+
+@pytest.mark.asyncio
+async def test_table_setup_called(monkeypatch):
+    calls = []
+
+    async def fake_fetch_coingecko(client):
+        return {"prices": [[0, 1]], "total_volumes": [[0, 1]]}
+
+    async def fake_fetch_coinmetrics(client):
+        df = pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[pd.Timestamp.utcnow()])
+        return df
+
+    async def fake_fetch_fred_series(client, series_id):
+        col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
+        return pd.DataFrame({col: [1]}, index=[pd.Timestamp.utcnow()])
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_connect(url):
+        return FakeConn()
+
+    def fake_execute_values(cur, sql, argslist, template=None):
+        pass
+
+    def fake_setup(conn):
+        calls.append(True)
+
+    monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
+    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
+    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+    monkeypatch.setattr(ingest.psycopg2, "connect", fake_connect)
+    monkeypatch.setattr(ingest.psycopg2.extras, "execute_values", fake_execute_values)
+    monkeypatch.setattr(ingest, "_create_table_if_missing", fake_setup)
+
+    await ingest.ingest_weekly()
+
+    assert calls == [True]
+
+
+def test_create_table_if_missing(monkeypatch):
+    executed = []
+
+    class FakeCursor:
+        def __init__(self):
+            self.calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def execute(self, sql):
+            executed.append(sql)
+            self.calls += 1
+            if self.calls == 2:
+                raise psycopg2.Error()
+
+    class FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def cursor(self):
+            return FakeCursor()
+
+    ingest._create_table_if_missing(FakeConn())
+
+    assert any("CREATE TABLE IF NOT EXISTS btc_weekly" in sql for sql in executed)
