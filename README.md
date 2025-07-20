@@ -32,6 +32,10 @@ export DATABASE_URL="postgresql://user:password@localhost:5432/bitcoin"
 If this variable is not set, the ingestion script will skip the database upsert
 step.
 
+The ingestion utility will create the `btc_weekly` table automatically if it is
+missing. When the TimescaleDB extension is available, the table is converted
+into a hypertable, but it also works with a plain PostgreSQL database.
+
 ## FRED API access
 Some economic series fetched from FRED may not be available via the simple CSV endpoint used by the ingestor.
 For those series you can provide a personal FRED API key through the `FRED_API_KEY` environment variable:

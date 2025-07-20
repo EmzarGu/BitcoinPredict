@@ -9,6 +9,7 @@ import httpx
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+import psycopg2.extensions
 import yfinance as yf
 from dotenv import load_dotenv
 
@@ -191,6 +192,42 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.Da
     return df[[column_name]]
 
 
+def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
+    """Create the ``btc_weekly`` table if it doesn't exist.
+
+    This function also attempts to convert the table into a TimescaleDB
+    hypertable when the extension is available. Both operations are safe to
+    call multiple times.
+    """
+
+    create_sql = """
+    CREATE TABLE IF NOT EXISTS btc_weekly (
+        week_start TIMESTAMPTZ PRIMARY KEY,
+        close_usd DOUBLE PRECISION,
+        realised_price DOUBLE PRECISION,
+        nupl DOUBLE PRECISION,
+        fed_liq DOUBLE PRECISION,
+        ecb_liq DOUBLE PRECISION,
+        dxy DOUBLE PRECISION,
+        ust10 DOUBLE PRECISION,
+        gold_price DOUBLE PRECISION,
+        spx_index DOUBLE PRECISION
+    );
+    """
+
+    with conn, conn.cursor() as cur:
+        cur.execute(create_sql)
+        try:
+            cur.execute(
+                "SELECT create_hypertable('btc_weekly', 'week_start', if_not_exists => TRUE);"
+            )
+        except psycopg2.Error:
+            logger.info(
+                "TimescaleDB extension not available; continuing with plain table"
+            )
+
+
+
 async def ingest_weekly() -> pd.DataFrame:
     """Fetch raw data for the current ISO week and aggregate to weekly.
 
@@ -253,6 +290,7 @@ async def ingest_weekly() -> pd.DataFrame:
         logger.warning("DATABASE_URL not set; skipping DB upsert")
     else:
         conn = psycopg2.connect(database_url)
+        _create_table_if_missing(conn)
         columns = ",".join(SCHEMA_COLUMNS)
         update = ",".join([f"{c} = EXCLUDED.{c}" for c in SCHEMA_COLUMNS[1:]])
         with conn, conn.cursor() as cur:
