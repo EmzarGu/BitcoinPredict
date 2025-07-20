@@ -208,11 +208,13 @@ async def _fetch_yahoo_gold() -> pd.DataFrame:
         )
 
     series = raw[price_col]
+    # ``yfinance`` may return a DataFrame when multiple columns share the
+    # selected name. In that case pick the first column to obtain a Series.
     if isinstance(series, pd.DataFrame):
         series = series.iloc[:, 0]
     series = series.rename("gold_price")
     series.index = pd.to_datetime(series.index, utc=True)
-    df = series.to_frame().resample("W-MON", label="left", closed="left").last()
+    df = pd.DataFrame(series).resample("W-MON", label="left", closed="left").last()
     logger.info("Fetched %s rows for Yahoo gold price", len(df))
     if df.empty:
         stub = pd.DataFrame(
@@ -266,11 +268,13 @@ async def _fetch_yahoo_btc(
             index=[pd.Timestamp(start_ts, tz="UTC")],
         )
     series = raw[price_col]
+    # ``yfinance`` can return a DataFrame when duplicate columns exist; select
+    # the first column to obtain a Series in that case.
     if isinstance(series, pd.DataFrame):
         series = series.iloc[:, 0]
     series = series.rename("close_usd")
     series.index = pd.to_datetime(series.index, utc=True)
-    df = series.to_frame().resample("W-MON", label="left", closed="left").last()
+    df = pd.DataFrame(series).resample("W-MON", label="left", closed="left").last()
     df["volume"] = pd.NA
     logger.info("Fetched %s rows for Yahoo BTC price", len(df))
     if df.empty:
