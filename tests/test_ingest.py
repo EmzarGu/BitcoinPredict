@@ -253,6 +253,9 @@ async def test_ingest_weekly_db_upsert(monkeypatch):
         def __exit__(self, exc_type, exc, tb):
             pass
 
+        def commit(self):
+            pass
+
         def close(self):
             pass
 
@@ -305,6 +308,9 @@ async def test_table_setup_called(monkeypatch):
             return self
 
         def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def commit(self):
             pass
 
         def close(self):
@@ -360,6 +366,9 @@ def test_create_table_if_missing(monkeypatch):
 
         def cursor(self):
             return FakeCursor()
+
+        def commit(self):
+            pass
 
     ingest._create_table_if_missing(FakeConn())
 
