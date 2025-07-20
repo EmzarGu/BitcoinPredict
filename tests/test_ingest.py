@@ -185,6 +185,39 @@ async def test_fetch_yahoo_gold_invalid(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_yahoo_gold_prices_missing(monkeypatch):
+    fixed = pd.Timestamp("2024-01-01", tz="UTC")
+
+    def fake_download(*args, **kwargs):
+        raise ingest.YFPricesMissingError("GC=F", {})
+
+    monkeypatch.setattr(pd.Timestamp, "utcnow", staticmethod(lambda: fixed))
+    monkeypatch.setattr(ingest.yf, "download", fake_download)
+
+    df = await ingest._fetch_yahoo_gold()
+    assert list(df.columns) == ["gold_price"]
+    assert df.iloc[0]["gold_price"] is pd.NA
+    assert df.index[0] == fixed
+
+
+@pytest.mark.asyncio
+async def test_fetch_yahoo_btc_prices_missing(monkeypatch):
+    fixed = pd.Timestamp("2024-01-01", tz="UTC")
+
+    def fake_download(*args, **kwargs):
+        raise ingest.YFPricesMissingError("BTC-USD", {})
+
+    monkeypatch.setattr(pd.Timestamp, "utcnow", staticmethod(lambda: fixed))
+    monkeypatch.setattr(ingest.yf, "download", fake_download)
+
+    df = await ingest._fetch_yahoo_btc()
+    assert list(df.columns) == ["close_usd", "volume"]
+    assert df.iloc[0]["close_usd"] is pd.NA
+    assert df.iloc[0]["volume"] is pd.NA
+    assert df.index[0] == fixed
+
+
+@pytest.mark.asyncio
 async def test_fred_fallback_to_yahoo(monkeypatch):
     class FakeResponse:
         def raise_for_status(self):

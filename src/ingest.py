@@ -11,6 +11,7 @@ import psycopg2
 import psycopg2.extras
 import psycopg2.extensions
 import yfinance as yf
+from yfinance.exceptions import YFPricesMissingError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -168,6 +169,7 @@ async def _fetch_coinmetrics(
 
 async def _fetch_yahoo_gold() -> pd.DataFrame:
     """Fetch daily gold price from Yahoo Finance and resample to weekly."""
+    start = pd.Timestamp.utcnow().normalize().to_pydatetime().replace(tzinfo=None)
     try:
         raw = await asyncio.to_thread(
             yf.download,
@@ -176,6 +178,9 @@ async def _fetch_yahoo_gold() -> pd.DataFrame:
             interval="1d",
             auto_adjust=False,
         )
+    except YFPricesMissingError:
+        logger.warning("Failed to fetch gold price from Yahoo Finance")
+        return pd.DataFrame({"gold_price": [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")])
     except Exception:
         logger.warning("Failed to fetch gold price from Yahoo Finance")
         empty_index = pd.DatetimeIndex([], tz="UTC")
@@ -195,7 +200,11 @@ async def _fetch_yahoo_gold() -> pd.DataFrame:
         empty_index = pd.DatetimeIndex([], tz="UTC")
         return pd.DataFrame(columns=["gold_price"], index=empty_index)
 
-    series = raw[price_col].rename("gold_price")
+    if raw.empty:
+        return pd.DataFrame({"gold_price": [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")])
+
+    series = raw[price_col]
+    series.name = "gold_price"
     series.index = pd.to_datetime(series.index, utc=True)
     df = (
         series.to_frame()
@@ -205,7 +214,7 @@ async def _fetch_yahoo_gold() -> pd.DataFrame:
     logger.info("Fetched %s rows for Yahoo gold price", len(df))
     if df.empty:
         stub = pd.DataFrame(
-            {"gold_price": [pd.NA]}, index=[pd.Timestamp.utcnow().normalize()]
+            {"gold_price": [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")]
         )
         return stub
     return df[["gold_price"]]
@@ -213,6 +222,7 @@ async def _fetch_yahoo_gold() -> pd.DataFrame:
 
 async def _fetch_yahoo_btc(start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame:
     """Fetch daily BTC price from Yahoo Finance and resample to weekly."""
+    start_ts = pd.Timestamp.utcnow().normalize().to_pydatetime().replace(tzinfo=None)
     kwargs = {"interval": "1d", "auto_adjust": False}
     if start and end:
         kwargs.update({"start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")})
@@ -220,6 +230,9 @@ async def _fetch_yahoo_btc(start: datetime | None = None, end: datetime | None =
         kwargs.update({"period": "1mo"})
     try:
         raw = await asyncio.to_thread(yf.download, "BTC-USD", **kwargs)
+    except YFPricesMissingError:
+        logger.warning("Failed to fetch BTC price from Yahoo Finance")
+        return pd.DataFrame({"close_usd": [pd.NA], "volume": [pd.NA]}, index=[pd.Timestamp(start_ts, tz="UTC")])
     except Exception:
         logger.warning("Failed to fetch BTC price from Yahoo Finance")
         empty_index = pd.DatetimeIndex([], tz="UTC")
@@ -238,13 +251,16 @@ async def _fetch_yahoo_btc(start: datetime | None = None, end: datetime | None =
         empty_index = pd.DatetimeIndex([], tz="UTC")
         return pd.DataFrame(columns=["close_usd", "volume"], index=empty_index)
 
-    series = raw[price_col].rename("close_usd")
+    if raw.empty:
+        return pd.DataFrame({"close_usd": [pd.NA], "volume": [pd.NA]}, index=[pd.Timestamp(start_ts, tz="UTC")])
+    series = raw[price_col]
+    series.name = "close_usd"
     series.index = pd.to_datetime(series.index, utc=True)
     df = series.to_frame().resample("W-MON", label="left", closed="left").last()
     df["volume"] = pd.NA
     logger.info("Fetched %s rows for Yahoo BTC price", len(df))
     if df.empty:
-        stub = pd.DataFrame({"close_usd": [pd.NA], "volume": [pd.NA]}, index=[pd.Timestamp.utcnow().normalize()])
+        stub = pd.DataFrame({"close_usd": [pd.NA], "volume": [pd.NA]}, index=[pd.Timestamp(start_ts, tz="UTC")])
         return stub
     return df[["close_usd", "volume"]]
 
