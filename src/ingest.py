@@ -47,12 +47,33 @@ FRED_COLUMN_MAP = {
 }
 
 
-async def _fetch_coingecko(client: httpx.AsyncClient, days: int = 8) -> Dict[str, Any]:
-    resp = await client.get(
-        COINGECKO_URL,
-        params={"vs_currency": "usd", "days": days, "interval": "daily"},
-        timeout=30,
-    )
+async def _fetch_coingecko(
+    client: httpx.AsyncClient,
+    days: int = 8,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> Dict[str, Any]:
+    """Fetch Bitcoin prices from Coingecko.
+
+    When ``start`` and ``end`` are provided the range endpoint is used. This
+    allows retrieval of historical data for backfilling.
+    """
+
+    if start or end:
+        if not (start and end):
+            raise ValueError("Both start and end must be provided for range fetch")
+        url = COINGECKO_URL + "/range"
+        params = {
+            "vs_currency": "usd",
+            "from": int(start.timestamp()),
+            "to": int(end.timestamp()),
+        }
+    else:
+        url = COINGECKO_URL
+        params = {"vs_currency": "usd", "days": days, "interval": "daily"}
+
+    resp = await client.get(url, params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
@@ -79,10 +100,25 @@ def _coingecko_to_weekly(data: Dict[str, Any]) -> pd.DataFrame:
 
 
 async def _fetch_coinmetrics(
-    client: httpx.AsyncClient, days: int = 8
+    client: httpx.AsyncClient,
+    days: int = 8,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> pd.DataFrame:
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=days)
+    """Fetch metrics from CoinMetrics.
+
+    If ``start`` and ``end`` are given they delimit the requested range;
+    otherwise the last ``days`` are returned.
+    """
+
+    if start or end:
+        if not (start and end):
+            raise ValueError("Both start and end must be provided for range fetch")
+    else:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=days)
+
     params = {
         "assets": "btc",
         "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD",
@@ -252,25 +288,42 @@ def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
 
 
 
-async def ingest_weekly() -> pd.DataFrame:
-    """Fetch raw data for the current ISO week and aggregate to weekly.
+async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
+    """Fetch raw data for the specified ISO week and aggregate to weekly.
 
-    Missing values are forward-filled so the returned dataframe always has one
-    row for the current week. The function never raises and will skip the
-    database step if ``DATABASE_URL`` is not configured.
+    When ``week_anchor`` is ``None`` the current week is used. Missing values are
+    forward-filled so the returned dataframe always has one row. The function
+    never raises and will skip the database step if ``DATABASE_URL`` is not
+    configured.
 
     Returns:
-        pd.DataFrame: One-row DataFrame for the current week.
+        pd.DataFrame: One-row DataFrame for the requested week.
     """
 
-    now = datetime.now(timezone.utc)
+    now = week_anchor or datetime.now(timezone.utc)
     week_start = (now - timedelta(days=now.weekday())).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        cg_task = asyncio.create_task(_fetch_coingecko(client))
-        cm_task = asyncio.create_task(_fetch_coinmetrics(client))
+        if week_anchor:
+            cg_task = asyncio.create_task(
+                _fetch_coingecko(
+                    client,
+                    start=week_start,
+                    end=week_start + timedelta(days=7),
+                )
+            )
+            cm_task = asyncio.create_task(
+                _fetch_coinmetrics(
+                    client,
+                    start=week_start,
+                    end=week_start + timedelta(days=7),
+                )
+            )
+        else:
+            cg_task = asyncio.create_task(_fetch_coingecko(client))
+            cm_task = asyncio.create_task(_fetch_coinmetrics(client))
         fed_liq_task = asyncio.create_task(_fetch_fred_series(client, "WALCL"))
         ecb_liq_task = asyncio.create_task(_fetch_fred_series(client, "ECBASSETS"))
         dxy_task = asyncio.create_task(_fetch_fred_series(client, "DTWEXBGS"))

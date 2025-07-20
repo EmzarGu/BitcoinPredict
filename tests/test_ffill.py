@@ -11,11 +11,11 @@ async def test_forward_fill(monkeypatch):
     week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     prev_week = week_start - timedelta(days=7)
 
-    async def fake_fetch_coingecko(client):
+    async def fake_fetch_coingecko(client, *args, **kwargs):
         ts = int(now.timestamp() * 1000)
         return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
 
-    async def fake_fetch_coinmetrics(client):
+    async def fake_fetch_coinmetrics(client, *args, **kwargs):
         df = pd.DataFrame({"realised_price": [1], "nupl": [0]}, index=[week_start])
         return df
 
@@ -34,11 +34,11 @@ async def test_forward_fill(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_week_start_present(monkeypatch):
-    async def fake_fetch_coingecko(client):
+    async def fake_fetch_coingecko(client, *args, **kwargs):
         ts = int(datetime(2024, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
         return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
 
-    async def fake_fetch_coinmetrics(client):
+    async def fake_fetch_coinmetrics(client, *args, **kwargs):
         week = pd.Timestamp("2024-01-01", tz="UTC")
         df = pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[week])
         return df
