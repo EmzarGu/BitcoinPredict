@@ -54,24 +54,21 @@ async def _fetch_coingecko(
     start: datetime | None = None,
     end: datetime | None = None,
 ) -> pd.DataFrame:
-    """Fetch Bitcoin prices from Coingecko with fallback to Yahoo."""
+    """Fetch Bitcoin prices.
 
-    if start and (datetime.now(timezone.utc) - start).days > 365:
-        logger.info("Date %s older than 365 days - using Yahoo Finance", start.date())
-        return await _fetch_yahoo_btc(start=start, end=end)
+    When ``start`` and ``end`` are provided the data is pulled from Yahoo
+    Finance instead of CoinGecko. This avoids hitting the range endpoint and
+    keeps the return schema consistent with the live path.
+    """
 
     if start or end:
         if not (start and end):
             raise ValueError("Both start and end must be provided for range fetch")
-        url = COINGECKO_URL + "/range"
-        params = {
-            "vs_currency": "usd",
-            "from": int(start.timestamp()),
-            "to": int(end.timestamp()),
-        }
-    else:
-        url = COINGECKO_URL
-        params = {"vs_currency": "usd", "days": days, "interval": "daily"}
+        logger.info("Fetching BTC price from Yahoo Finance for %s", start.date())
+        return await _fetch_yahoo_btc(start=start, end=end)
+
+    url = COINGECKO_URL
+    params = {"vs_currency": "usd", "days": days, "interval": "daily"}
 
     headers = {}
     api_key = os.getenv("COINGECKO_API_KEY")
