@@ -205,3 +205,67 @@ async def test_fred_fallback_to_yahoo(monkeypatch):
     df = await ingest._fetch_fred_series(FakeClient(), "GOLDAMGBD228NLBM")
     assert list(df.columns) == ["gold_price"]
     assert df.iloc[0]["gold_price"] == 7
+
+
+@pytest.mark.asyncio
+async def test_ingest_weekly_db_upsert(monkeypatch):
+    """ingest_weekly should pass a row dict to execute_values."""
+
+    week_start = pd.Timestamp("2024-01-01", tz="UTC")
+
+    async def fake_fetch_coingecko(client):
+        ts = int(week_start.timestamp() * 1000)
+        return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
+
+    async def fake_fetch_coinmetrics(client):
+        df = pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[week_start])
+        return df
+
+    async def fake_fetch_fred_series(client, series_id):
+        col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
+        df = pd.DataFrame({col: [1]}, index=[week_start])
+        return df
+
+    monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
+    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
+    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+
+    captured = {}
+
+    class FakeCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_connect(url):
+        return FakeConn()
+
+    def fake_execute_values(cur, sql, argslist, template=None):
+        captured["argslist"] = argslist
+        captured["template"] = template
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+    monkeypatch.setattr(ingest.psycopg2, "connect", fake_connect)
+    monkeypatch.setattr(ingest.psycopg2.extras, "execute_values", fake_execute_values)
+
+    await ingest.ingest_weekly()
+
+    assert isinstance(captured.get("argslist"), list)
+    assert captured["argslist"] and isinstance(captured["argslist"][0], dict)
+    assert isinstance(captured.get("template"), str) and captured["template"]
+    assert "%(week_start)s" in captured["template"]
