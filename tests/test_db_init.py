@@ -38,3 +38,35 @@ def test_init_db_commit_order(monkeypatch):
     commit_indices = [i for i, c in enumerate(calls) if c[0] == "commit"]
     insert_call_index = calls.index(("execute", executed_sql[insert_idx]))
     assert any(idx < insert_call_index for idx in commit_indices)
+
+
+def test_create_table_if_missing_rollback(monkeypatch):
+    rolled_back = []
+
+    class FakeCursor:
+        def __init__(self):
+            self.called = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def execute(self, sql):
+            if "create_hypertable" in sql:
+                raise ingest.psycopg2.Error()
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            rolled_back.append(True)
+
+    ingest._create_table_if_missing(FakeConn())
+
+    assert rolled_back == [True]
