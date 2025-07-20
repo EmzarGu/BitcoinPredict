@@ -256,10 +256,12 @@ async def ingest_weekly() -> pd.DataFrame:
         columns = ",".join(SCHEMA_COLUMNS)
         update = ",".join([f"{c} = EXCLUDED.{c}" for c in SCHEMA_COLUMNS[1:]])
         with conn, conn.cursor() as cur:
+            template = "(" + ",".join(f"%({col})s" for col in SCHEMA_COLUMNS) + ")"
             psycopg2.extras.execute_values(
                 cur,
                 f"INSERT INTO btc_weekly ({columns}) VALUES %s ON CONFLICT (week_start) DO UPDATE SET {update}",
                 [row.iloc[0].to_dict()],
+                template=template,
             )
         conn.close()
 
