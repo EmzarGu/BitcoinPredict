@@ -24,13 +24,13 @@ def test_coin_gecko_to_weekly():
 
 @pytest.mark.asyncio
 async def test_schema_columns(monkeypatch):
-    week_start = pd.Timestamp("2024-01-01", tz="UTC")
+    week_start = pd.Timestamp(datetime.now(tz=timezone.utc))
 
     async def fake_fetch_coingecko(client, *args, **kwargs):
-        return {
-            "prices": [[int(week_start.timestamp() * 1000), 10]],
-            "total_volumes": [[int(week_start.timestamp() * 1000), 1]],
-        }
+        df = pd.DataFrame(
+            {"close_usd": [10], "volume": [1]}, index=[week_start]
+        )
+        return df
 
     async def fake_fetch_coinmetrics(client, *args, **kwargs):
         df = pd.DataFrame({
@@ -125,11 +125,10 @@ async def test_fetch_fred_series_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_ingest_weekly_fred_failure(monkeypatch):
-    week_start = pd.Timestamp("2024-01-01", tz="UTC")
+    week_start = pd.Timestamp(datetime.now(tz=timezone.utc))
 
     async def fake_fetch_coingecko(client, *args, **kwargs):
-        ts = int(week_start.timestamp() * 1000)
-        return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
+        return pd.DataFrame({"close_usd": [10], "volume": [1]}, index=[week_start])
 
     async def fake_fetch_coinmetrics(client, *args, **kwargs):
         df = pd.DataFrame({"realised_price": [1], "nupl": [0]}, index=[week_start])
@@ -210,7 +209,7 @@ async def test_fred_fallback_to_yahoo(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_retry_on_429(monkeypatch):
-    week_start = pd.Timestamp("2024-01-01", tz="UTC")
+    week_start = pd.Timestamp(datetime.now(tz=timezone.utc))
 
     class Resp429:
         status_code = 429
@@ -218,38 +217,57 @@ async def test_retry_on_429(monkeypatch):
         def raise_for_status(self):
             raise httpx.HTTPStatusError("err", request=None, response=self)
 
-    calls = 0
+    class FakeResp:
+        def __init__(self, status_code=200):
+            self.status_code = status_code
 
-    async def fake_fetch_coingecko(client, *args, **kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise httpx.HTTPStatusError("err", request=None, response=Resp429())
-        ts = int(week_start.timestamp() * 1000)
-        return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError("err", request=None, response=self)
 
-    async def fake_fetch_coinmetrics(client, *args, **kwargs):
+        def json(self):
+            ts = int(week_start.timestamp() * 1000)
+            return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def get(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResp(429)
+            return FakeResp(200)
+
+    async def fake_coinmetrics(*args, **kwargs):
         return pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[week_start])
 
-    async def fake_fetch_fred_series(client, series_id):
+    async def fake_fred(client, series_id):
         col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
         return pd.DataFrame({col: [1]}, index=[week_start])
 
     async def fake_sleep(_):
         pass
 
-    monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
-    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
-    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    client = FakeClient()
+    monkeypatch.setattr(ingest.httpx, "AsyncClient", lambda *a, **k: client)
+    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_coinmetrics)
+    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fred)
     monkeypatch.setattr(ingest.asyncio, "sleep", fake_sleep)
 
     await ingest.ingest_weekly(week_anchor=week_start)
-    assert calls == 2
+    assert client.calls == 2
 
 
 @pytest.mark.asyncio
 async def test_coingecko_fallback_to_yahoo(monkeypatch):
-    week_start = pd.Timestamp("2024-01-01", tz="UTC")
+    week_start = pd.Timestamp(datetime.now(tz=timezone.utc))
 
     class Resp401:
         status_code = 401
@@ -257,37 +275,58 @@ async def test_coingecko_fallback_to_yahoo(monkeypatch):
         def raise_for_status(self):
             raise httpx.HTTPStatusError("err", request=None, response=self)
 
-    cg_calls = 0
-    yahoo_calls = 0
+    class FakeResp:
+        def __init__(self, status):
+            self.status_code = status
 
-    async def fake_fetch_coingecko(client, *args, **kwargs):
-        nonlocal cg_calls
-        cg_calls += 1
-        raise httpx.HTTPStatusError("err", request=None, response=Resp401())
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError("err", request=None, response=self)
+
+        def json(self):
+            ts = int(week_start.timestamp() * 1000)
+            return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            pass
+
+        async def get(self, *args, **kwargs):
+            self.calls += 1
+            return FakeResp(401)
+
+    yahoo_calls = 0
 
     async def fake_yahoo_btc(*args, **kwargs):
         nonlocal yahoo_calls
         yahoo_calls += 1
-        return pd.DataFrame({"close_usd": [7]}, index=[week_start])
+        return pd.DataFrame({"close_usd": [7], "volume": [pd.NA]}, index=[week_start])
 
-    async def fake_fetch_coinmetrics(client, *args, **kwargs):
+    async def fake_coinmetrics(*args, **kwargs):
         return pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[week_start])
 
-    async def fake_fetch_fred_series(client, series_id):
+    async def fake_fred(client, series_id):
         col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
         return pd.DataFrame({col: [1]}, index=[week_start])
 
     async def fake_sleep(_):
         pass
 
-    monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
+    client = FakeClient()
+    monkeypatch.setattr(ingest.httpx, "AsyncClient", lambda *a, **k: client)
     monkeypatch.setattr(ingest, "_fetch_yahoo_btc", fake_yahoo_btc)
-    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
-    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_coinmetrics)
+    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fred)
     monkeypatch.setattr(ingest.asyncio, "sleep", fake_sleep)
 
     df = await ingest.ingest_weekly(week_anchor=week_start)
-    assert cg_calls == 3
+    assert client.calls == 3
     assert yahoo_calls == 1
     assert df.loc[0, "close_usd"] == 7
 
@@ -299,8 +338,7 @@ async def test_ingest_weekly_db_upsert(monkeypatch):
     week_start = pd.Timestamp("2024-01-01", tz="UTC")
 
     async def fake_fetch_coingecko(client, *args, **kwargs):
-        ts = int(week_start.timestamp() * 1000)
-        return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
+        return pd.DataFrame({"close_usd": [10], "volume": [1]}, index=[week_start])
 
     async def fake_fetch_coinmetrics(client, *args, **kwargs):
         df = pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[week_start])
@@ -367,7 +405,7 @@ async def test_table_setup_called(monkeypatch):
     calls = []
 
     async def fake_fetch_coingecko(client, *args, **kwargs):
-        return {"prices": [[0, 1]], "total_volumes": [[0, 1]]}
+        return pd.DataFrame({"close_usd": [1], "volume": [1]}, index=[pd.Timestamp.utcnow()])
 
     async def fake_fetch_coinmetrics(client, *args, **kwargs):
         df = pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[pd.Timestamp.utcnow()])
