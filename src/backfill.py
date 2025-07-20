@@ -20,6 +20,7 @@ def backfill(start_date: datetime, end_date: datetime | None = None) -> None:
     while anchor <= end_limit:
         logger.info("Ingesting week starting %s", anchor.date())
         asyncio.run(ingest.ingest_weekly(week_anchor=anchor))
+        asyncio.run(asyncio.sleep(0.5))
         anchor += timedelta(days=7)
 
 

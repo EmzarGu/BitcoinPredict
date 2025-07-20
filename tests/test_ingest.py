@@ -209,6 +209,90 @@ async def test_fred_fallback_to_yahoo(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_retry_on_429(monkeypatch):
+    week_start = pd.Timestamp("2024-01-01", tz="UTC")
+
+    class Resp429:
+        status_code = 429
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("err", request=None, response=self)
+
+    calls = 0
+
+    async def fake_fetch_coingecko(client, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.HTTPStatusError("err", request=None, response=Resp429())
+        ts = int(week_start.timestamp() * 1000)
+        return {"prices": [[ts, 10]], "total_volumes": [[ts, 1]]}
+
+    async def fake_fetch_coinmetrics(client, *args, **kwargs):
+        return pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[week_start])
+
+    async def fake_fetch_fred_series(client, series_id):
+        col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
+        return pd.DataFrame({col: [1]}, index=[week_start])
+
+    async def fake_sleep(_):
+        pass
+
+    monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
+    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
+    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setattr(ingest.asyncio, "sleep", fake_sleep)
+
+    await ingest.ingest_weekly(week_anchor=week_start)
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_coingecko_fallback_to_yahoo(monkeypatch):
+    week_start = pd.Timestamp("2024-01-01", tz="UTC")
+
+    class Resp401:
+        status_code = 401
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("err", request=None, response=self)
+
+    cg_calls = 0
+    yahoo_calls = 0
+
+    async def fake_fetch_coingecko(client, *args, **kwargs):
+        nonlocal cg_calls
+        cg_calls += 1
+        raise httpx.HTTPStatusError("err", request=None, response=Resp401())
+
+    async def fake_yahoo_btc(*args, **kwargs):
+        nonlocal yahoo_calls
+        yahoo_calls += 1
+        return pd.DataFrame({"close_usd": [7]}, index=[week_start])
+
+    async def fake_fetch_coinmetrics(client, *args, **kwargs):
+        return pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[week_start])
+
+    async def fake_fetch_fred_series(client, series_id):
+        col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
+        return pd.DataFrame({col: [1]}, index=[week_start])
+
+    async def fake_sleep(_):
+        pass
+
+    monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_btc", fake_yahoo_btc)
+    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
+    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setattr(ingest.asyncio, "sleep", fake_sleep)
+
+    df = await ingest.ingest_weekly(week_anchor=week_start)
+    assert cg_calls == 3
+    assert yahoo_calls == 1
+    assert df.loc[0, "close_usd"] == 7
+
+
+@pytest.mark.asyncio
 async def test_ingest_weekly_db_upsert(monkeypatch):
     """ingest_weekly should pass a row dict to execute_values."""
 
