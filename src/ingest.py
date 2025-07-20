@@ -53,12 +53,12 @@ async def _fetch_coingecko(
     *,
     start: datetime | None = None,
     end: datetime | None = None,
-) -> Dict[str, Any]:
-    """Fetch Bitcoin prices from Coingecko.
+) -> pd.DataFrame:
+    """Fetch Bitcoin prices from Coingecko with fallback to Yahoo."""
 
-    When ``start`` and ``end`` are provided the range endpoint is used. This
-    allows retrieval of historical data for backfilling.
-    """
+    if start and (datetime.now(timezone.utc) - start).days > 365:
+        logger.info("Date %s older than 365 days - using Yahoo Finance", start.date())
+        return await _fetch_yahoo_btc(start=start, end=end)
 
     if start or end:
         if not (start and end):
@@ -73,16 +73,29 @@ async def _fetch_coingecko(
         url = COINGECKO_URL
         params = {"vs_currency": "usd", "days": days, "interval": "daily"}
 
-    resp = await client.get(url, params=params, timeout=30)
-    try:
-        resp.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        status = exc.response.status_code
-        if status in (401, 429):
-            logger.warning("Coingecko HTTP %s - falling back to Yahoo Finance", status)
-            return await _fetch_yahoo_btc(start=start, end=end)
-        raise
-    return resp.json()
+    headers = {}
+    api_key = os.getenv("COINGECKO_API_KEY")
+    if api_key:
+        headers["x-cg-demo-api-key"] = api_key
+
+    delay = 1
+    for attempt in range(3):
+        try:
+            resp = await client.get(url, params=params, headers=headers, timeout=30)
+            resp.raise_for_status()
+            return _coingecko_to_weekly(resp.json())
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status >= 500 or status in (401, 429):
+                if attempt < 2:
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                logger.warning("Coingecko HTTP %s - falling back to Yahoo Finance", status)
+                return await _fetch_yahoo_btc(start=start, end=end)
+            raise
+
+    return await _fetch_yahoo_btc(start=start, end=end)
 
 
 def _coingecko_to_weekly(data: Dict[str, Any]) -> pd.DataFrame:
@@ -213,7 +226,7 @@ async def _fetch_yahoo_btc(start: datetime | None = None, end: datetime | None =
     except Exception:
         logger.warning("Failed to fetch BTC price from Yahoo Finance")
         empty_index = pd.DatetimeIndex([], tz="UTC")
-        return pd.DataFrame(columns=["close_usd"], index=empty_index)
+        return pd.DataFrame(columns=["close_usd", "volume"], index=empty_index)
 
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.droplevel(1)
@@ -226,16 +239,17 @@ async def _fetch_yahoo_btc(start: datetime | None = None, end: datetime | None =
     if price_col is None:
         logger.warning("Yahoo Finance BTC data missing Close column")
         empty_index = pd.DatetimeIndex([], tz="UTC")
-        return pd.DataFrame(columns=["close_usd"], index=empty_index)
+        return pd.DataFrame(columns=["close_usd", "volume"], index=empty_index)
 
     series = raw[price_col].rename("close_usd")
     series.index = pd.to_datetime(series.index, utc=True)
     df = series.to_frame().resample("W-MON", label="left", closed="left").last()
+    df["volume"] = pd.NA
     logger.info("Fetched %s rows for Yahoo BTC price", len(df))
     if df.empty:
-        stub = pd.DataFrame({"close_usd": [pd.NA]}, index=[pd.Timestamp.utcnow().normalize()])
+        stub = pd.DataFrame({"close_usd": [pd.NA], "volume": [pd.NA]}, index=[pd.Timestamp.utcnow().normalize()])
         return stub
-    return df[["close_usd"]]
+    return df[["close_usd", "volume"]]
 
 
 async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.DataFrame:
@@ -374,17 +388,10 @@ async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
     async with httpx.AsyncClient(follow_redirects=True) as client:
         if week_anchor:
             cg_task = asyncio.create_task(
-                _fetch_with_retry(
-                    lambda: _fetch_coingecko(
-                        client,
-                        start=week_start,
-                        end=week_start + timedelta(days=7),
-                    ),
-                    name="coingecko",
-                    columns=["close_usd", "volume"],
-                    fallback=lambda: _fetch_yahoo_btc(
-                        start=week_start, end=week_start + timedelta(days=7)
-                    ),
+                _fetch_coingecko(
+                    client,
+                    start=week_start,
+                    end=week_start + timedelta(days=7),
                 )
             )
             cm_task = asyncio.create_task(
@@ -400,12 +407,7 @@ async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
             )
         else:
             cg_task = asyncio.create_task(
-                _fetch_with_retry(
-                    lambda: _fetch_coingecko(client),
-                    name="coingecko",
-                    columns=["close_usd", "volume"],
-                    fallback=lambda: _fetch_yahoo_btc(),
-                )
+                _fetch_coingecko(client)
             )
             cm_task = asyncio.create_task(
                 _fetch_with_retry(
@@ -423,11 +425,7 @@ async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
         )
         sp500_task = asyncio.create_task(_fetch_fred_series(client, "SP500"))
 
-        cg_raw = await cg_task
-        if isinstance(cg_raw, dict):
-            cg_data = _coingecko_to_weekly(cg_raw)
-        else:
-            cg_data = cg_raw
+        cg_data = await cg_task
         cm_data = await cm_task
         fed_liq = await fed_liq_task
         ecb_liq = await ecb_liq_task
