@@ -553,3 +553,25 @@ async def test_fetch_with_retry_request_error_fallback(monkeypatch):
     assert fallback_called
     assert not df.empty
     assert df.iloc[0]["close_usd"] == 1
+
+@pytest.mark.asyncio
+async def test_fetch_with_retry_read_error(monkeypatch):
+    """_fetch_with_retry should return empty DataFrame on ReadError."""
+
+    async def failing():
+        raise httpx.ReadError("boom", request=httpx.Request("GET", "http://x"))
+
+    async def fake_sleep(_):
+        pass
+
+    monkeypatch.setattr(ingest, "_fetch_coinmetrics", failing)
+    monkeypatch.setattr(ingest.asyncio, "sleep", fake_sleep)
+
+    df = await ingest._fetch_with_retry(
+        ingest._fetch_coinmetrics,
+        name="coinmetrics",
+        columns=["realised_price", "nupl"],
+    )
+
+    assert list(df.columns) == ["realised_price", "nupl"]
+    assert df.empty
