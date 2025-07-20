@@ -89,7 +89,9 @@ async def _fetch_coingecko(
                     await asyncio.sleep(delay)
                     delay *= 2
                     continue
-                logger.warning("Coingecko HTTP %s - falling back to Yahoo Finance", status)
+                logger.warning(
+                    "Coingecko HTTP %s - falling back to Yahoo Finance", status
+                )
                 return await _fetch_yahoo_btc(start=start, end=end)
             raise
 
@@ -165,8 +167,6 @@ async def _fetch_coinmetrics(
     return df[["realised_price", "nupl"]]
 
 
-
-
 async def _fetch_yahoo_gold() -> pd.DataFrame:
     """Fetch daily gold price from Yahoo Finance and resample to weekly."""
     start = pd.Timestamp.utcnow().normalize().to_pydatetime().replace(tzinfo=None)
@@ -180,7 +180,9 @@ async def _fetch_yahoo_gold() -> pd.DataFrame:
         )
     except YFPricesMissingError:
         logger.warning("Failed to fetch gold price from Yahoo Finance")
-        return pd.DataFrame({"gold_price": [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")])
+        return pd.DataFrame(
+            {"gold_price": [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")]
+        )
     except Exception:
         logger.warning("Failed to fetch gold price from Yahoo Finance")
         empty_index = pd.DatetimeIndex([], tz="UTC")
@@ -201,16 +203,16 @@ async def _fetch_yahoo_gold() -> pd.DataFrame:
         return pd.DataFrame(columns=["gold_price"], index=empty_index)
 
     if raw.empty:
-        return pd.DataFrame({"gold_price": [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")])
+        return pd.DataFrame(
+            {"gold_price": [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")]
+        )
 
     series = raw[price_col]
-    series.name = "gold_price"
+    if isinstance(series, pd.DataFrame):
+        series = series.iloc[:, 0]
+    series = series.rename("gold_price")
     series.index = pd.to_datetime(series.index, utc=True)
-    df = (
-        series.to_frame()
-        .resample("W-MON", label="left", closed="left")
-        .last()
-    )
+    df = series.to_frame().resample("W-MON", label="left", closed="left").last()
     logger.info("Fetched %s rows for Yahoo gold price", len(df))
     if df.empty:
         stub = pd.DataFrame(
@@ -220,19 +222,26 @@ async def _fetch_yahoo_gold() -> pd.DataFrame:
     return df[["gold_price"]]
 
 
-async def _fetch_yahoo_btc(start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame:
+async def _fetch_yahoo_btc(
+    start: datetime | None = None, end: datetime | None = None
+) -> pd.DataFrame:
     """Fetch daily BTC price from Yahoo Finance and resample to weekly."""
     start_ts = pd.Timestamp.utcnow().normalize().to_pydatetime().replace(tzinfo=None)
     kwargs = {"interval": "1d", "auto_adjust": False}
     if start and end:
-        kwargs.update({"start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")})
+        kwargs.update(
+            {"start": start.strftime("%Y-%m-%d"), "end": end.strftime("%Y-%m-%d")}
+        )
     else:
         kwargs.update({"period": "1mo"})
     try:
         raw = await asyncio.to_thread(yf.download, "BTC-USD", **kwargs)
     except YFPricesMissingError:
         logger.warning("Failed to fetch BTC price from Yahoo Finance")
-        return pd.DataFrame({"close_usd": [pd.NA], "volume": [pd.NA]}, index=[pd.Timestamp(start_ts, tz="UTC")])
+        return pd.DataFrame(
+            {"close_usd": [pd.NA], "volume": [pd.NA]},
+            index=[pd.Timestamp(start_ts, tz="UTC")],
+        )
     except Exception:
         logger.warning("Failed to fetch BTC price from Yahoo Finance")
         empty_index = pd.DatetimeIndex([], tz="UTC")
@@ -252,15 +261,23 @@ async def _fetch_yahoo_btc(start: datetime | None = None, end: datetime | None =
         return pd.DataFrame(columns=["close_usd", "volume"], index=empty_index)
 
     if raw.empty:
-        return pd.DataFrame({"close_usd": [pd.NA], "volume": [pd.NA]}, index=[pd.Timestamp(start_ts, tz="UTC")])
+        return pd.DataFrame(
+            {"close_usd": [pd.NA], "volume": [pd.NA]},
+            index=[pd.Timestamp(start_ts, tz="UTC")],
+        )
     series = raw[price_col]
-    series.name = "close_usd"
+    if isinstance(series, pd.DataFrame):
+        series = series.iloc[:, 0]
+    series = series.rename("close_usd")
     series.index = pd.to_datetime(series.index, utc=True)
     df = series.to_frame().resample("W-MON", label="left", closed="left").last()
     df["volume"] = pd.NA
     logger.info("Fetched %s rows for Yahoo BTC price", len(df))
     if df.empty:
-        stub = pd.DataFrame({"close_usd": [pd.NA], "volume": [pd.NA]}, index=[pd.Timestamp(start_ts, tz="UTC")])
+        stub = pd.DataFrame(
+            {"close_usd": [pd.NA], "volume": [pd.NA]},
+            index=[pd.Timestamp(start_ts, tz="UTC")],
+        )
         return stub
     return df[["close_usd", "volume"]]
 
@@ -284,11 +301,7 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.Da
     # Rename the first column to "date" since FRED uses "observation_date"
     df.rename(columns={df.columns[0]: "date", df.columns[1]: column_name}, inplace=True)
     df["date"] = pd.to_datetime(df["date"], utc=True)
-    df = (
-        df.set_index("date")
-        .resample("W-MON", label="left", closed="left")
-        .last()
-    )
+    df = df.set_index("date").resample("W-MON", label="left", closed="left").last()
     logger.info("Fetched %s rows for %s", len(df), series_id)
     if df.empty:
         stub = pd.DataFrame(
@@ -364,9 +377,7 @@ def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
         conn.commit()
     except psycopg2.Error:
         conn.rollback()
-        logger.info(
-            "Timescale extension unavailable; continuing with plain table"
-        )
+        logger.info("Timescale extension unavailable; continuing with plain table")
 
 
 def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
@@ -385,7 +396,6 @@ def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
             template=template,
         )
     conn.commit()
-
 
 
 async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
@@ -426,9 +436,7 @@ async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
                 )
             )
         else:
-            cg_task = asyncio.create_task(
-                _fetch_coingecko(client)
-            )
+            cg_task = asyncio.create_task(_fetch_coingecko(client))
             cm_task = asyncio.create_task(
                 _fetch_with_retry(
                     lambda: _fetch_coinmetrics(client),
@@ -440,9 +448,7 @@ async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
         ecb_liq_task = asyncio.create_task(_fetch_fred_series(client, "ECBASSETS"))
         dxy_task = asyncio.create_task(_fetch_fred_series(client, "DTWEXBGS"))
         ust10_task = asyncio.create_task(_fetch_fred_series(client, "DGS10"))
-        gold_task = asyncio.create_task(
-            _fetch_fred_series(client, "GOLDAMGBD228NLBM")
-        )
+        gold_task = asyncio.create_task(_fetch_fred_series(client, "GOLDAMGBD228NLBM"))
         sp500_task = asyncio.create_task(_fetch_fred_series(client, "SP500"))
 
         cg_data = await cg_task
@@ -460,9 +466,7 @@ async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
     df = df.sort_index().ffill()
     df = df.infer_objects(copy=False)
     df.index.name = "date"
-    df_weekly = (
-        df.resample("W-MON", label="left", closed="left").last().reset_index()
-    )
+    df_weekly = df.resample("W-MON", label="left", closed="left").last().reset_index()
     df_weekly["week_start"] = df_weekly["date"].dt.normalize()
     row = df_weekly[df_weekly["week_start"] == week_start]
     if row.empty:
@@ -473,6 +477,10 @@ async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
         if col not in row.columns:
             row[col] = pd.NA
     row = row[SCHEMA_COLUMNS]
+
+    if row.drop(columns=["week_start"]).isna().all(axis=None):
+        logger.info("Skipping %s \u2014 no data", week_start)
+        return row
 
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
