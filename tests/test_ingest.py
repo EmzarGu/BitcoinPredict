@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import logging
 
 import pandas as pd
 import pytest
@@ -27,16 +28,17 @@ async def test_schema_columns(monkeypatch):
     week_start = pd.Timestamp(datetime.now(tz=timezone.utc))
 
     async def fake_fetch_coingecko(client, *args, **kwargs):
-        df = pd.DataFrame(
-            {"close_usd": [10], "volume": [1]}, index=[week_start]
-        )
+        df = pd.DataFrame({"close_usd": [10], "volume": [1]}, index=[week_start])
         return df
 
     async def fake_fetch_coinmetrics(client, *args, **kwargs):
-        df = pd.DataFrame({
-            "realised_price": [1],
-            "nupl": [1],
-        }, index=[week_start])
+        df = pd.DataFrame(
+            {
+                "realised_price": [1],
+                "nupl": [1],
+            },
+            index=[week_start],
+        )
         return df
 
     async def fake_fetch_fred_series(client, series_id):
@@ -218,6 +220,36 @@ async def test_fetch_yahoo_btc_prices_missing(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_yahoo_helper_squeezes_dataframe(monkeypatch):
+    idx = [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]
+    cols = pd.MultiIndex.from_product([["Adj Close"], ["GC=F", "OTHER"]])
+    df_raw = pd.DataFrame([[4, 5], [6, 7]], index=idx, columns=cols)
+    df_raw.index.name = "Date"
+
+    def fake_download(*args, **kwargs):
+        return df_raw
+
+    monkeypatch.setattr(ingest.yf, "download", fake_download)
+
+    df = await ingest._fetch_yahoo_gold()
+    assert list(df.columns) == ["gold_price"]
+    assert df.iloc[0]["gold_price"] == 6
+
+    cols_btc = pd.MultiIndex.from_product([["Adj Close"], ["BTC-USD", "OTHER"]])
+    df_btc = pd.DataFrame([[1, 2], [3, 4]], index=idx, columns=cols_btc)
+    df_btc.index.name = "Date"
+
+    def fake_download_btc(*args, **kwargs):
+        return df_btc
+
+    monkeypatch.setattr(ingest.yf, "download", fake_download_btc)
+
+    df_b = await ingest._fetch_yahoo_btc()
+    assert list(df_b.columns) == ["close_usd", "volume"]
+    assert df_b.iloc[0]["close_usd"] == 3
+
+
+@pytest.mark.asyncio
 async def test_fred_fallback_to_yahoo(monkeypatch):
     class FakeResponse:
         def raise_for_status(self):
@@ -256,6 +288,7 @@ async def test_retry_on_429(monkeypatch):
 
         async def get(self, *args, **kwargs):
             self.calls += 1
+
             class Dummy:
                 def raise_for_status(self):
                     pass
@@ -310,6 +343,7 @@ async def test_coingecko_fallback_to_yahoo(monkeypatch):
 
         async def get(self, *args, **kwargs):
             self.calls += 1
+
             class Dummy:
                 def raise_for_status(self):
                     pass
@@ -423,10 +457,14 @@ async def test_table_setup_called(monkeypatch):
     calls = []
 
     async def fake_fetch_coingecko(client, *args, **kwargs):
-        return pd.DataFrame({"close_usd": [1], "volume": [1]}, index=[pd.Timestamp.utcnow()])
+        return pd.DataFrame(
+            {"close_usd": [1], "volume": [1]}, index=[pd.Timestamp.utcnow()]
+        )
 
     async def fake_fetch_coinmetrics(client, *args, **kwargs):
-        df = pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[pd.Timestamp.utcnow()])
+        df = pd.DataFrame(
+            {"realised_price": [1], "nupl": [1]}, index=[pd.Timestamp.utcnow()]
+        )
         return df
 
     async def fake_fetch_fred_series(client, series_id):
@@ -553,7 +591,9 @@ async def test_fetch_with_retry_request_error_fallback(monkeypatch):
     async def fallback():
         nonlocal fallback_called
         fallback_called = True
-        return pd.DataFrame({"close_usd": [1]}, index=[pd.Timestamp("2024-01-01", tz="UTC")])
+        return pd.DataFrame(
+            {"close_usd": [1]}, index=[pd.Timestamp("2024-01-01", tz="UTC")]
+        )
 
     async def fake_sleep(_):
         pass
@@ -571,6 +611,7 @@ async def test_fetch_with_retry_request_error_fallback(monkeypatch):
     assert fallback_called
     assert not df.empty
     assert df.iloc[0]["close_usd"] == 1
+
 
 @pytest.mark.asyncio
 async def test_fetch_with_retry_read_error(monkeypatch):
@@ -593,3 +634,41 @@ async def test_fetch_with_retry_read_error(monkeypatch):
 
     assert list(df.columns) == ["realised_price", "nupl"]
     assert df.empty
+
+
+@pytest.mark.asyncio
+async def test_ingest_weekly_historical_no_data(monkeypatch, caplog):
+    week_start = pd.Timestamp("2013-01-07", tz="UTC")
+
+    async def fake_fetch_coingecko(*args, **kwargs):
+        return pd.DataFrame(
+            {"close_usd": [pd.NA], "volume": [pd.NA]}, index=[week_start]
+        )
+
+    async def fake_fetch_coinmetrics(*args, **kwargs):
+        return pd.DataFrame(
+            {"realised_price": [pd.NA], "nupl": [pd.NA]}, index=[week_start]
+        )
+
+    async def fake_fetch_fred_series(client, series_id):
+        col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
+        return pd.DataFrame({col: [pd.NA]}, index=[week_start])
+
+    monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
+    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
+    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
+    called = []
+
+    def fake_init_db(conn, row):
+        called.append(True)
+
+    monkeypatch.setattr(ingest, "_init_db", fake_init_db)
+
+    with caplog.at_level(logging.INFO):
+        df = await ingest.ingest_weekly(week_anchor=week_start)
+
+    assert len(df) == 1
+    assert not called
+    assert any("Skipping" in r.message for r in caplog.records)
