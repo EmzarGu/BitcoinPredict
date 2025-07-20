@@ -227,6 +227,7 @@ def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
             )
         conn.commit()
     except psycopg2.Error:
+        conn.rollback()
         logger.info(
             "Timescale extension unavailable; continuing with plain table"
         )
