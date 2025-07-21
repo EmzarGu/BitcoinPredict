@@ -148,15 +148,36 @@ async def _fetch_coinmetrics(
     }
     resp = await client.get(COINMETRICS_URL, params=params, timeout=30)
     resp.raise_for_status()
-    data = resp.json().get("data", [])
+    payload = resp.json()
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        logger.warning("Unexpected CoinMetrics payload: %s", payload)
+        empty_index = pd.DatetimeIndex([], tz="UTC")
+        return pd.DataFrame(columns=["realised_price", "nupl"], index=empty_index)
+
     df = pd.DataFrame(data)
+    if "time" not in df.columns:
+        logger.warning("CoinMetrics payload missing 'time' column")
+        empty_index = pd.DatetimeIndex([], tz="UTC")
+        return pd.DataFrame(columns=["realised_price", "nupl"], index=empty_index)
+
     for col in ["CapRealUSD", "SplyCur", "CapMrktCurUSD"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
+
     df["date"] = pd.to_datetime(df["time"], utc=True)
     df = df.set_index("date").resample("W-MON", label="left", closed="left").last()
-    df["realised_price"] = df["CapRealUSD"] / df["SplyCur"]
-    df["nupl"] = (df["CapMrktCurUSD"] - df["CapRealUSD"]) / df["CapMrktCurUSD"]
+
+    if {"CapRealUSD", "SplyCur"}.issubset(df.columns):
+        df["realised_price"] = df["CapRealUSD"] / df["SplyCur"]
+    else:
+        df["realised_price"] = pd.NA
+
+    if {"CapMrktCurUSD", "CapRealUSD"}.issubset(df.columns):
+        df["nupl"] = (df["CapMrktCurUSD"] - df["CapRealUSD"]) / df["CapMrktCurUSD"]
+    else:
+        df["nupl"] = pd.NA
+
     logger.info("Fetched %s rows for CoinMetrics", len(df))
     if df.empty:
         stub = pd.DataFrame(

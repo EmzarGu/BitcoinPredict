@@ -672,3 +672,21 @@ async def test_ingest_weekly_historical_no_data(monkeypatch, caplog):
     assert len(df) == 1
     assert not called
     assert any("Skipping" in r.message for r in caplog.records)
+
+@pytest.mark.asyncio
+async def test_coinmetrics_missing_time(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"error": "Rate limit exceeded"}
+
+    class FakeClient:
+        async def get(self, url, params=None, timeout=30):
+            return FakeResponse()
+
+    df = await ingest._fetch_coinmetrics(FakeClient())
+    assert list(df.columns) == ["realised_price", "nupl"]
+    assert df.empty
+    assert isinstance(df.index, pd.DatetimeIndex)
+    assert df.index.tz == timezone.utc
