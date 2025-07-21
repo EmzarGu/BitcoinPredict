@@ -126,6 +126,30 @@ async def test_fetch_fred_series_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_ingest_weekly_yields_prices(monkeypatch):
+    week_start = pd.Timestamp(datetime.now(tz=timezone.utc))
+
+    async def fake_fetch_coingecko(client, *args, **kwargs):
+        return pd.DataFrame({"close_usd": [10], "volume": [1]}, index=[week_start])
+
+    async def fake_fetch_coinmetrics(client, *args, **kwargs):
+        return pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[week_start])
+
+    async def fake_fetch_fred_series(client, series_id):
+        col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
+        value = 5 if series_id == "GOLDAMGBD228NLBM" else 1
+        return pd.DataFrame({col: [value]}, index=[week_start])
+
+    monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
+    monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
+    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+
+    df = await ingest.ingest_weekly()
+    assert df.loc[0, "close_usd"] == 10
+    assert df.loc[0, "gold_price"] == 5
+
+
+@pytest.mark.asyncio
 async def test_fetch_fred_series_request_error(monkeypatch):
     class FakeClient:
         async def get(self, url, timeout=30):
