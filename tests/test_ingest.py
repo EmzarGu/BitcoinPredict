@@ -126,6 +126,19 @@ async def test_fetch_fred_series_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_fred_series_request_error(monkeypatch):
+    class FakeClient:
+        async def get(self, url, timeout=30):
+            raise httpx.RequestError("boom", request=httpx.Request("GET", url))
+
+    df = await ingest._fetch_fred_series(FakeClient(), "WALCL")
+    assert list(df.columns) == ["fed_liq"]
+    assert df.empty
+    assert isinstance(df.index, pd.DatetimeIndex)
+    assert df.index.tz == timezone.utc
+
+
+@pytest.mark.asyncio
 async def test_ingest_weekly_fred_failure(monkeypatch):
     week_start = pd.Timestamp(datetime.now(tz=timezone.utc))
 
@@ -258,6 +271,25 @@ async def test_fred_fallback_to_yahoo(monkeypatch):
     class FakeClient:
         async def get(self, url, timeout=30):
             return FakeResponse()
+
+    async def fake_yahoo():
+        df = pd.DataFrame(
+            {"gold_price": [7]}, index=[pd.Timestamp("2024-01-01", tz="UTC")]
+        )
+        return df
+
+    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_yahoo)
+
+    df = await ingest._fetch_fred_series(FakeClient(), "GOLDAMGBD228NLBM")
+    assert list(df.columns) == ["gold_price"]
+    assert df.iloc[0]["gold_price"] == 7
+
+
+@pytest.mark.asyncio
+async def test_fred_fallback_to_yahoo_request_error(monkeypatch):
+    class FakeClient:
+        async def get(self, url, timeout=30):
+            raise httpx.RequestError("boom", request=httpx.Request("GET", url))
 
     async def fake_yahoo():
         df = pd.DataFrame(
