@@ -331,6 +331,12 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.Da
             return await _fetch_yahoo_gold()
         empty_index = pd.DatetimeIndex([], tz="UTC")
         return pd.DataFrame(columns=[column_name], index=empty_index)
+    except httpx.RequestError:
+        logger.warning("Failed to fetch FRED series %s", series_id)
+        if series_id == "GOLDAMGBD228NLBM":
+            return await _fetch_yahoo_gold()
+        empty_index = pd.DatetimeIndex([], tz="UTC")
+        return pd.DataFrame(columns=[column_name], index=empty_index)
     df = pd.read_csv(io.StringIO(resp.text))
     df.columns = [c.lower() for c in df.columns]
     # Rename the first column to "date" since FRED uses "observation_date"
