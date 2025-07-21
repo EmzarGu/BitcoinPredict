@@ -305,6 +305,26 @@ async def test_fred_fallback_to_yahoo_request_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_fred_series_request_error_gold_fallback(monkeypatch):
+    """RequestError should trigger Yahoo fallback for the gold series."""
+
+    class FakeClient:
+        async def get(self, url, timeout=30):
+            raise httpx.RequestError("boom", request=httpx.Request("GET", url))
+
+    async def fake_yahoo():
+        return pd.DataFrame(
+            {"gold_price": [5]}, index=[pd.Timestamp("2024-01-01", tz="UTC")]
+        )
+
+    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_yahoo)
+
+    df = await ingest._fetch_fred_series(FakeClient(), "GOLDAMGBD228NLBM")
+    assert list(df.columns) == ["gold_price"]
+    assert df.iloc[0]["gold_price"] == 5
+
+
+@pytest.mark.asyncio
 async def test_retry_on_429(monkeypatch):
     week_start = pd.Timestamp(datetime.now(tz=timezone.utc))
 
