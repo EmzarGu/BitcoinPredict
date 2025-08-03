@@ -4,14 +4,43 @@ import pandas as pd
 import yfinance as yf
 from pycoingecko import CoinGeckoAPI
 from datetime import datetime, timedelta
+import psycopg2
+from psycopg2.extras import execute_values
 
-# Initialize CoinGecko API
-cg = CoinGeckoAPI()
+# --- Database Connection ---
+def get_db_connection():
+    """Establishes a connection to the PostgreSQL database."""
+    return psycopg2.connect(
+        host=os.environ.get('DB_HOST'),
+        database=os.environ.get('DB_NAME'),
+        user=os.environ.get('DB_USER'),
+        password=os.environ.get('DB_PASSWORD')
+    )
+
+def create_table_if_not_exists(conn):
+    """Creates the btc_weekly table if it doesn't already exist."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS btc_weekly (
+                week_start TIMESTAMP PRIMARY KEY,
+                close_usd REAL,
+                realised_price REAL,
+                nupl REAL,
+                fed_liq REAL,
+                ecb_liq REAL,
+                dxy REAL,
+                ust10 REAL,
+                gold_price REAL,
+                spx_index REAL
+            );
+        """)
+        conn.commit()
+
+# --- Data Ingestion ---
 
 def get_btc_price_coingecko(start_date, end_date):
-    """
-    Fetches Bitcoin price data from CoinGecko.
-    """
+    """Fetches Bitcoin price data from CoinGecko."""
+    cg = CoinGeckoAPI()
     try:
         start_ts = int(start_date.timestamp())
         end_ts = int(end_date.timestamp())
@@ -32,37 +61,29 @@ def get_btc_price_coingecko(start_date, end_date):
         return pd.DataFrame()
 
 def get_yfinance_data(ticker, start_date, end_date, column_name):
-    """
-    Generic function to fetch data from Yahoo Finance, ensuring a simple column structure.
-    """
+    """Generic function to fetch data from Yahoo Finance."""
     try:
-        # Download data, explicitly setting auto_adjust to handle warnings
         data = yf.download(ticker, start=start_date, end=end_date, auto_adjust=True)
         if not data.empty:
-            # Select only the 'Close' column and create a new DataFrame
             df = data[['Close']].copy()
-            # Set a simple, single-level column name
             df.columns = [column_name]
-            
-            # Validate data
-            if 'price' in column_name or 'usd' in column_name:
-                df = df[df[column_name] > 0]
             return df
         return pd.DataFrame()
     except Exception as e:
         print(f"An error occurred with Yahoo Finance for {ticker}: {e}")
         return pd.DataFrame()
 
-def main(years=1):
+def ingest_weekly(week_anchor, years=1):
     """
-    Main function to ingest data and save it to a CSV file.
+    Ingests weekly data and upserts it into the database.
     
+    :param week_anchor: The anchor date for the week.
     :param years: Number of years of historical data to fetch.
     """
-    end_date = datetime.now()
+    end_date = week_anchor
     start_date = end_date - timedelta(days=365 * years)
 
-    # Fetch data from sources
+    # --- Fetch Data ---
     btc_df = get_btc_price_coingecko(start_date, end_date)
     if btc_df.empty:
         print("Falling back to Yahoo Finance for Bitcoin data.")
@@ -72,33 +93,67 @@ def main(years=1):
     spx_df = get_yfinance_data('^GSPC', start_date, end_date, 'spx_index')
     dxy_df = get_yfinance_data('DX-Y.NYB', start_date, end_date, 'dxy')
     ust10_df = get_yfinance_data('^TNX', start_date, end_date, 'ust10')
-
-    # --- Data Merging ---
-    # Start with the Bitcoin data as the base
+    
+    # --- Merge Data ---
     merged_df = btc_df
-    # List of dataframes to merge
-    dataframes_to_merge = [gold_df, spx_df, dxy_df, ust10_df]
-
-    for df in dataframes_to_merge:
+    for df in [gold_df, spx_df, dxy_df, ust10_df]:
         if not df.empty:
             merged_df = merged_df.merge(df, how='left', left_index=True, right_index=True)
 
-    # Handle missing values
     merged_df.fillna(method='ffill', inplace=True)
     merged_df.dropna(inplace=True)
 
-    # --- Save to CSV ---
-    output_dir = 'data'
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        
-    file_path = os.path.join(output_dir, f'btc_and_macro_data_{years}y.csv')
-    merged_df.to_csv(file_path)
+    # Resample to weekly, taking the last value of the week
+    weekly_df = merged_df.resample('W').last()
     
-    print(f"Data ingestion complete. File saved to {file_path}")
+    # --- Upsert to Database ---
+    with get_db_connection() as conn:
+        create_table_if_not_exists(conn)
+        with conn.cursor() as cur:
+            # Prepare data for upsert
+            data_to_upsert = []
+            for index, row in weekly_df.iterrows():
+                # Ensure all required columns are present
+                data_to_upsert.append((
+                    index,
+                    row.get('close_usd'),
+                    None,  # realised_price
+                    None,  # nupl
+                    None,  # fed_liq
+                    None,  # ecb_liq
+                    row.get('dxy'),
+                    row.get('ust10'),
+                    row.get('gold_price'),
+                    row.get('spx_index')
+                ))
+
+            # Upsert logic
+            execute_values(
+                cur,
+                """
+                INSERT INTO btc_weekly (week_start, close_usd, realised_price, nupl, fed_liq, ecb_liq, dxy, ust10, gold_price, spx_index)
+                VALUES %s
+                ON CONFLICT (week_start) DO UPDATE SET
+                    close_usd = EXCLUDED.close_usd,
+                    realised_price = EXCLUDED.realised_price,
+                    nupl = EXCLUDED.nupl,
+                    fed_liq = EXCLUDED.fed_liq,
+                    ecb_liq = EXCLUDED.ecb_liq,
+                    dxy = EXCLUDED.dxy,
+                    ust10 = EXCLUDED.ust10,
+                    gold_price = EXCLUDED.gold_price,
+                    spx_index = EXCLUDED.spx_index;
+                """,
+                data_to_upsert
+            )
+        conn.commit()
+    print(f"Successfully ingested and upserted {len(weekly_df)} weeks of data.")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Ingest historical market data.')
+    parser = argparse.ArgumentParser(description='Ingest historical market data into the database.')
     parser.add_argument('--years', type=int, default=1, help='Number of years of historical data to fetch.')
     args = parser.parse_args()
-    main(years=args.years)
+    
+    today = datetime.now()
+    ingest_weekly(today, years=args.years)
