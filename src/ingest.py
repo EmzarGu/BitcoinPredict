@@ -50,14 +50,12 @@ def create_table_if_not_exists(conn):
         """)
         conn.commit()
 
-# --- All Data Fetching Functions (with the final bug fix) ---
+# --- All Data Fetching Functions ---
 async def _fetch_yahoo_data(ticker: str, start: datetime, end: datetime, col_name: str) -> pd.DataFrame:
     """Fetches data from Yahoo Finance."""
     try:
         data = await asyncio.to_thread(yf.download, ticker, start=start, end=end, auto_adjust=True, progress=False)
         if not data.empty:
-            # FIX: Ensure index is timezone-aware
-            data.index = pd.to_datetime(data.index, utc=True)
             df = data[['Close']].copy()
             df.columns = [col_name]
             return df
@@ -72,8 +70,6 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name
         resp = await client.get(url, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text), index_col=0, parse_dates=True)
-        # FIX: Ensure index is timezone-aware
-        df.index = df.index.tz_localize('UTC')
         df.columns = [col_name]
         df[col_name] = pd.to_numeric(df[col_name], errors='coerce')
         return df
@@ -132,8 +128,19 @@ async def ingest_weekly(week_anchor, years=1):
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
+    # --- Definitive Timezone Fix ---
+    # This loop forces every dataframe to have a UTC timezone before merging.
+    processed_dfs = []
+    for name, df in dataframes.items():
+        if not df.empty:
+            if df.index.tz is None:
+                df.index = df.index.tz_localize('UTC')
+            else:
+                df.index = df.index.tz_convert('UTC')
+            processed_dfs.append(df)
+
     # Correctly merge all dataframes
-    merged_df = pd.concat([df for df in dataframes.values() if not df.empty], axis=1)
+    merged_df = pd.concat(processed_dfs, axis=1)
     merged_df.ffill(inplace=True)
     merged_df.dropna(subset=['close_usd'], inplace=True) # Ensure core data exists
 
