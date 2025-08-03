@@ -29,6 +29,8 @@ COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metr
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 FRED_API_KEY = os.getenv("FRED_API_KEY")
 
+
+# This mapping is from your original script
 FRED_COLUMN_MAP = {
     "WALCL": "fed_liq", "ECBASSETS": "ecb_liq", "DTWEXBGS": "dxy",
     "DGS10": "ust10", "GOLDAMGBD228NLBM": "gold_price", "SP500": "spx_index",
@@ -78,7 +80,8 @@ def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
     conn.commit()
 
 # --- All Data Fetching Functions (Restored to your original, robust logic) ---
-async def _fetch_yahoo_gold(start, end) -> pd.DataFrame:
+
+async def _fetch_yahoo_gold(start: datetime, end: datetime) -> pd.DataFrame:
     """Specific fetcher for Gold from Yahoo as a fallback."""
     try:
         raw = await asyncio.to_thread(yf.download, "GC=F", start=start, end=end, auto_adjust=True, progress=False)
@@ -113,32 +116,11 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, start, e
         return df[[column_name]]
     except Exception as e:
         logger.warning(f"Failed to fetch FRED series {series_id}: {e}")
+        # RESTORED: Your original fallback logic for gold price
         if series_id == "GOLDAMGBD228NLBM":
             logger.warning("Falling back to Yahoo Finance for gold price.")
             return await _fetch_yahoo_gold(start, end)
     return pd.DataFrame()
-
-
-async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame:
-    """Fetch Bitcoin prices from CoinGecko, with Yahoo Finance as fallback."""
-    try:
-        if start and end: # Prioritize Yahoo for specific ranges as in original
-            return await _fetch_yahoo_btc(start, end)
-
-        # Your original CoinGecko logic with retries and fallback
-        params = {"vs_currency": "usd", "days": 8, "interval": "daily"}
-        resp = await client.get(COINGECKO_URL, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        prices = pd.DataFrame(data.get("prices", []), columns=["ts", "price"])
-        prices["date"] = pd.to_datetime(prices["ts"], unit="ms", utc=True).dt.floor("D")
-        df = prices.set_index("date")[["price"]].rename(columns={"price": "close_usd"})
-        df["volume"] = pd.NA # Placeholder as per original
-        return df
-
-    except Exception as e:
-        logger.warning(f"CoinGecko failed ({e}), falling back to Yahoo Finance.")
-        return await _fetch_yahoo_btc(start, end)
 
 
 async def _fetch_yahoo_btc(start: datetime | None, end: datetime | None) -> pd.DataFrame:
@@ -173,6 +155,28 @@ async def _fetch_yahoo_btc(start: datetime | None, end: datetime | None) -> pd.D
     return pd.DataFrame()
 
 
+async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame:
+    """Fetches Bitcoin prices from CoinGecko, with Yahoo Finance as fallback."""
+    try:
+        if start and end: # Prioritize Yahoo for specific ranges as in original
+            return await _fetch_yahoo_btc(start, end)
+
+        # Your original CoinGecko logic with retries and fallback
+        params = {"vs_currency": "usd", "days": 8, "interval": "daily"}
+        resp = await client.get(COINGECKO_URL, params=params, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        prices = pd.DataFrame(data.get("prices", []), columns=["ts", "price"])
+        prices["date"] = pd.to_datetime(prices["ts"], unit="ms", utc=True).dt.floor("D")
+        df = prices.set_index("date")[["price"]].rename(columns={"price": "close_usd"})
+        df["volume"] = pd.NA # Placeholder as per original
+        return df
+
+    except Exception as e:
+        logger.warning(f"CoinGecko failed ({e}), falling back to Yahoo Finance.")
+        return await _fetch_yahoo_btc(start, end)
+
+
 async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
     """Fetches on-chain metrics from CoinMetrics."""
     params = {"assets": "btc", "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD", "frequency": "1d", "start_time": start_date.strftime("%Y-%m-%d"), "end_time": end_date.strftime("%Y-%m-%d")}
@@ -204,6 +208,7 @@ async def ingest_weekly(week_anchor=None, years=1):
 
     print("Fetching market data...")
     async with httpx.AsyncClient(follow_redirects=True) as client:
+        # This task setup is from your original script
         tasks = {
             "btc": _fetch_coingecko(client, start=start_date, end=end_date),
             "cm": _fetch_coinmetrics(client, start_date=start_date, end_date=end_date),
