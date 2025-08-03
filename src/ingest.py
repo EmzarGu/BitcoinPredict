@@ -56,7 +56,7 @@ async def _fetch_yahoo_data(ticker: str, start: datetime, end: datetime, col_nam
     try:
         data = await asyncio.to_thread(yf.download, ticker, start=start, end=end, auto_adjust=True, progress=False)
         if not data.empty:
-            # FIX: This line adds the missing timezone information to prevent the TypeError
+            # FIX: Ensure index is timezone-aware
             data.index = pd.to_datetime(data.index, utc=True)
             df = data[['Close']].copy()
             df.columns = [col_name]
@@ -72,7 +72,7 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name
         resp = await client.get(url, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text), index_col=0, parse_dates=True)
-        # This line ensures FRED data is also timezone-aware
+        # FIX: Ensure index is timezone-aware
         df.index = df.index.tz_localize('UTC')
         df.columns = [col_name]
         df[col_name] = pd.to_numeric(df[col_name], errors='coerce')
@@ -175,4 +175,19 @@ async def ingest_weekly(week_anchor, years=1):
                     INSERT INTO btc_weekly (week_start, close_usd, realised_price, nupl, fed_liq, ecb_liq, dxy, ust10, gold_price, spx_index)
                     VALUES %s ON CONFLICT (week_start) DO UPDATE SET
                         close_usd = EXCLUDED.close_usd, realised_price = EXCLUDED.realised_price, nupl = EXCLUDED.nupl,
-                        fed_liq = EXCLUDED.fed_liq, ecb_liq = EXCLUDED.ecb_liq, dxy = EXCLUDED.d
+                        fed_liq = EXCLUDED.fed_liq, ecb_liq = EXCLUDED.ecb_liq, dxy = EXCLUDED.dxy,
+                        ust10 = EXCLUDED.ust10, gold_price = EXCLUDED.gold_price, spx_index = EXCLUDED.spx_index;
+                    """,
+                    data_to_upsert
+                )
+            conn.commit()
+        print(f"✅ Successfully ingested and upserted {len(data_to_upsert)} weeks of data.")
+    except Exception as e:
+        print(f"❌ An error occurred during the database operation: {e}")
+
+# This block allows running the script from the command line, just like your original
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Ingest historical market data into the database.')
+    parser.add_argument('--years', type=int, default=1, help='Number of years of historical data to fetch.')
+    args = parser.parse_args()
+    asyncio.run(ingest_weekly(datetime.now(timezone.utc), years=args.years))
