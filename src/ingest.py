@@ -7,7 +7,7 @@ from psycopg2.extras import execute_values
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
-# This line loads your DATABASE_URL from your .env file, just like your original script.
+# This line loads your DATABASE_URL from your .env file
 load_dotenv()
 
 # --- Database Connection (Using your original, working method) ---
@@ -37,11 +37,17 @@ def create_table_if_not_exists(conn):
         """)
         conn.commit()
 
-# --- Data Ingestion (With corrected logic for data quality) ---
+# --- Helper Function to Fix the Bug ---
+def to_python_float(value):
+    """Converts a pandas/numpy number to a standard Python float, or None."""
+    if pd.isna(value):
+        return None
+    return float(value)
+
+# --- Data Ingestion (With corrected logic) ---
 def get_yfinance_data(ticker, start_date, end_date, column_name):
     """Generic function to fetch data from Yahoo Finance."""
     try:
-        # Fetch data and suppress the progress bar for cleaner logs
         data = yf.download(ticker, start=start_date, end=end_date, auto_adjust=True, progress=False)
         if not data.empty:
             df = data[['Close']].copy()
@@ -57,7 +63,6 @@ def ingest_weekly(week_anchor, years=1):
     start_date = end_date - timedelta(days=365 * years)
 
     print("Fetching market data...")
-    # --- Fetch Data ---
     btc_df = get_yfinance_data('BTC-USD', start_date, end_date, 'close_usd')
     gold_df = get_yfinance_data('GC=F', start_date, end_date, 'gold_price')
     spx_df = get_yfinance_data('^GSPC', start_date, end_date, 'spx_index')
@@ -68,15 +73,13 @@ def ingest_weekly(week_anchor, years=1):
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
-    # --- Merge Data ---
     merged_df = btc_df
     for df in [gold_df, spx_df, dxy_df, ust10_df]:
         if not df.empty:
             merged_df = merged_df.merge(df, how='left', left_index=True, right_index=True)
 
-    # Use ffill() which is the modern replacement for the deprecated method
     merged_df.ffill(inplace=True)
-    merged_df.dropna(inplace=True) # Drop any rows that still have NaNs (e.g., at the start)
+    merged_df.dropna(inplace=True)
 
     if merged_df.empty:
         print("No data to process after merging. Aborting.")
@@ -84,24 +87,25 @@ def ingest_weekly(week_anchor, years=1):
 
     weekly_df = merged_df.resample('W-MON').last()
 
-    # --- Upsert to Database ---
     print("Connecting to database...")
     try:
         with get_db_connection() as conn:
             print("✅ Database connection successful.")
             create_table_if_not_exists(conn)
             with conn.cursor() as cur:
+                # Using the helper function here to fix the bug
                 data_to_upsert = [
                     (
                         idx,
-                        row.get('close_usd'), None, None, None, None, # Placeholders for old columns
-                        row.get('dxy'), row.get('ust10'),
-                        row.get('gold_price'), row.get('spx_index')
+                        to_python_float(row.get('close_usd')), None, None, None, None,
+                        to_python_float(row.get('dxy')),
+                        to_python_float(row.get('ust10')),
+                        to_python_float(row.get('gold_price')),
+                        to_python_float(row.get('spx_index'))
                     )
                     for idx, row in weekly_df.iterrows()
                 ]
 
-                # This is the reliable upsert logic
                 execute_values(
                     cur,
                     """
