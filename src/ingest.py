@@ -3,36 +3,24 @@ import io
 import logging
 import os
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
 
 import httpx
 import pandas as pd
 import psycopg2
 import psycopg2.extras
-import psycopg2.extensions
 import yfinance as yf
-from yfinance.exceptions import YFPricesMissingError
 from dotenv import load_dotenv
+from yfinance.exceptions import YFPricesMissingError
 
 # This loads your DATABASE_URL and any API keys from your .env file
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_COLUMNS: List[str] = [
+SCHEMA_COLUMNS: list[str] = [
     "week_start", "close_usd", "realised_price", "nupl", "fed_liq",
     "ecb_liq", "dxy", "ust10", "gold_price", "spx_index",
 ]
-
-COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
-FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-FRED_API_KEY = os.getenv("FRED_API_KEY")
-
-FRED_COLUMN_MAP = {
-    "WALCL": "fed_liq", "ECBASSETS": "ecb_liq", "DTWEXBGS": "dxy",
-    "DGS10": "ust10", "GOLDAMGBD228NLBM": "gold_price", "SP500": "spx_index",
-}
 
 # --- Helper Function to Fix the Database Data Type Bug ---
 def to_python_float(value):
@@ -49,7 +37,7 @@ def get_db_connection():
         raise ValueError("DATABASE_URL not found. Please check your .env file.")
     return psycopg2.connect(database_url)
 
-def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
+def _create_table_if_missing(conn):
     """Create the ``btc_weekly`` table if it doesn't exist."""
     create_sql = """
     CREATE TABLE IF NOT EXISTS btc_weekly (
@@ -62,7 +50,7 @@ def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
         cur.execute(create_sql)
     conn.commit()
 
-def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
+def _init_db(conn, row: dict):
     """Ensure table exists and upsert a single row."""
     _create_table_if_missing(conn)
     columns = ",".join(SCHEMA_COLUMNS)
@@ -77,107 +65,61 @@ def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
         )
     conn.commit()
 
+
 # --- All Data Fetching Functions (Restored to your original, robust logic) ---
-async def _fetch_yahoo_gold(start, end) -> pd.DataFrame:
-    """Specific fetcher for Gold from Yahoo as a fallback."""
+async def _fetch_yahoo_data(ticker: str, start: datetime, end: datetime, col_name: str) -> pd.DataFrame:
+    """Fetches data from Yahoo Finance using the original robust method."""
     try:
-        raw = await asyncio.to_thread(yf.download, "GC=F", start=start, end=end, auto_adjust=True, progress=False)
-        if raw.empty: return pd.DataFrame()
+        raw = await asyncio.to_thread(yf.download, ticker, start=start, end=end, auto_adjust=True, progress=False)
+        if raw.empty:
+            return pd.DataFrame()
         
+        # This robust column handling is from your original script
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.droplevel(0)
-
-        price_col = 'Adj Close' if 'Adj Close' in raw.columns else 'Close'
-        if price_col not in raw.columns: return pd.DataFrame()
         
+        price_col = 'Close'
+        if price_col not in raw.columns:
+            logger.warning(f"Yahoo Finance data for {ticker} missing Close column")
+            return pd.DataFrame()
+
         df = raw[[price_col]].copy()
-        df.columns = ["gold_price"]
+        df.columns = [col_name]
         df.index = pd.to_datetime(df.index, utc=True)
         return df
     except Exception as e:
-        logger.warning(f"Failed to fetch gold from Yahoo Finance: {e}")
+        logger.warning(f"Failed to fetch {ticker} from Yahoo Finance: {e}")
     return pd.DataFrame()
 
 
-async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, start, end) -> pd.DataFrame:
-    """Fetches a single data series from FRED, with fallback for Gold."""
-    url = FRED_URL.format(series_id=series_id)
-    column_name = FRED_COLUMN_MAP.get(series_id, series_id.lower())
+async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name: str) -> pd.DataFrame:
+    """Fetches a single data series from FRED."""
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
     try:
         resp = await client.get(url, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text), index_col=0, parse_dates=True)
-        df.index = df.index.tz_localize('UTC') # FIX: Add timezone info
-        df.columns = [column_name]
-        df[column_name] = pd.to_numeric(df[column_name], errors='coerce')
-        return df[[column_name]]
+        # FIX: This line adds the missing timezone information to prevent the TypeError
+        df.index = df.index.tz_localize('UTC')
+        df.columns = [col_name]
+        df[col_name] = pd.to_numeric(df[col_name], errors='coerce')
+        return df
     except Exception as e:
         logger.warning(f"Failed to fetch FRED series {series_id}: {e}")
-        if series_id == "GOLDAMGBD228NLBM":
-            logger.warning("Falling back to Yahoo Finance for gold price.")
-            return await _fetch_yahoo_gold(start, end)
-    return pd.DataFrame()
-
-
-async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame:
-    """Fetch Bitcoin prices from CoinGecko, with Yahoo Finance as fallback."""
-    try:
-        if start and end: # Prioritize Yahoo for specific ranges as in original
-            return await _fetch_yahoo_btc(start, end)
-
-        # Your original CoinGecko logic with retries and fallback
-        params = {"vs_currency": "usd", "days": 8, "interval": "daily"}
-        resp = await client.get(COINGECKO_URL, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        prices = pd.DataFrame(data.get("prices", []), columns=["ts", "price"])
-        prices["date"] = pd.to_datetime(prices["ts"], unit="ms", utc=True).dt.floor("D")
-        df = prices.set_index("date")[["price"]].rename(columns={"price": "close_usd"})
-        df["volume"] = pd.NA # Placeholder as per original
-        return df
-
-    except Exception as e:
-        logger.warning(f"CoinGecko failed ({e}), falling back to Yahoo Finance.")
-        return await _fetch_yahoo_btc(start, end)
-
-
-async def _fetch_yahoo_btc(start: datetime | None, end: datetime | None) -> pd.DataFrame:
-    """Fetches BTC price from Yahoo, restored from your original script."""
-    try:
-        kwargs = {"interval": "1d", "auto_adjust": False}
-        if start and end:
-            kwargs.update({"start": start, "end": end})
-        else:
-            kwargs.update({"period": "1mo"})
-
-        raw = await asyncio.to_thread(yf.download, "BTC-USD", **kwargs)
-        if raw.empty: return pd.DataFrame()
-
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.droplevel(1)
-        
-        price_col = 'Adj Close' if 'Adj Close' in raw.columns else 'Close'
-        if price_col not in raw.columns: return pd.DataFrame()
-
-        series = raw[price_col]
-        if isinstance(series, pd.DataFrame):
-            series = series.iloc[:, 0]
-        
-        series.name = "close_usd"
-        series.index = pd.to_datetime(series.index, utc=True)
-        df = series.to_frame()
-        df["volume"] = pd.NA
-        return df[["close_usd", "volume"]]
-    except Exception as e:
-        logger.warning(f"Failed to fetch BTC from Yahoo Finance: {e}")
     return pd.DataFrame()
 
 
 async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
     """Fetches on-chain metrics from CoinMetrics."""
-    params = {"assets": "btc", "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD", "frequency": "1d", "start_time": start_date.strftime("%Y-%m-%d"), "end_time": end_date.strftime("%Y-%m-%d")}
+    params = {
+        "assets": "btc",
+        "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD",
+        "frequency": "1d",
+        "start_time": start_date.strftime("%Y-%m-%d"),
+        "end_time": end_date.strftime("%Y-%m-%d"),
+    }
     try:
-        resp = await client.get(COINMETRICS_URL, params=params, timeout=30)
+        resp = await client.get("https://community-api.coinmetrics.io/v4/timeseries/asset-metrics", params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json().get("data", [])
         if not data: return pd.DataFrame()
@@ -194,25 +136,27 @@ async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, en
     return pd.DataFrame()
 
 
-# --- Main Ingestion Logic (Based on your original) ---
+# --- Main Ingestion Logic ---
 async def ingest_weekly(week_anchor=None, years=1):
     """Main async function to ingest weekly data and upsert to database."""
     now = week_anchor or datetime.now(timezone.utc)
-    week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = (now - timedelta(days=now.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     end_date = now
     start_date = end_date - timedelta(days=365 * years)
 
     print("Fetching market data...")
     async with httpx.AsyncClient(follow_redirects=True) as client:
         tasks = {
-            "btc": _fetch_coingecko(client, start=start_date, end=end_date),
-            "cm": _fetch_coinmetrics(client, start_date=start_date, end_date=end_date),
-            "fed_liq": _fetch_fred_series(client, "WALCL", start_date, end_date),
-            "ecb_liq": _fetch_fred_series(client, "ECBASSETS", start_date, end_date),
-            "dxy": _fetch_fred_series(client, "DTWEXBGS", start_date, end_date),
-            "ust10": _fetch_fred_series(client, "DGS10", start_date, end_date),
-            "gold": _fetch_fred_series(client, "GOLDAMGBD228NLBM", start_date, end_date),
-            "spx": _fetch_fred_series(client, "SP500", start_date, end_date),
+            "btc": _fetch_yahoo_data('BTC-USD', start_date, end_date, 'close_usd'),
+            "cm": _fetch_coinmetrics(client, start_date, end_date),
+            "fed_liq": _fetch_fred_series(client, "WALCL", "fed_liq"),
+            "ecb_liq": _fetch_fred_series(client, "ECBASSETS", "ecb_liq"),
+            "dxy": _fetch_fred_series(client, "DTWEXBGS", "dxy"),
+            "ust10": _fetch_fred_series(client, "DGS10", "ust10"),
+            "gold": _fetch_yahoo_data('GC=F', start_date, end_date, 'gold_price'), # Using Yahoo for gold as a reliable source
+            "spx": _fetch_yahoo_data('^GSPC', start_date, end_date, 'spx_index'),
         }
         results = await asyncio.gather(*tasks.values())
         dataframes = dict(zip(tasks.keys(), results))
@@ -223,45 +167,42 @@ async def ingest_weekly(week_anchor=None, years=1):
 
     # Correctly merge all dataframes
     merged_df = pd.concat([df for df in dataframes.values() if not df.empty], axis=1)
-    if "volume" in merged_df.columns:
-        merged_df = merged_df.drop(columns=["volume"])
-    
-    merged_df = merged_df.sort_index().ffill()
+    merged_df.ffill(inplace=True)
     merged_df.dropna(subset=['close_usd'], inplace=True)
 
     if merged_df.empty:
         print("No data to process after merging. Aborting.")
         return
-    
-    # This logic correctly processes all weeks of data, not just one row
-    weekly_df = merged_df.resample('W-MON', label="left", closed="left").last()
-    
-    data_to_upsert = []
-    for idx, row in weekly_df.iterrows():
-        if idx.date() < start_date.date(): continue # Skip data outside the requested range
-        final_row = row.to_dict()
-        final_row['week_start'] = idx
-        for key, value in final_row.items():
-            if key != 'week_start':
-                final_row[key] = to_python_float(value)
-        for col in SCHEMA_COLUMNS:
-            if col not in final_row:
-                final_row[col] = None
-        data_to_upsert.append(final_row)
 
-    if not data_to_upsert:
-        print("⚠️ No new weekly data to insert.")
-        return
+    # Resample and select the relevant week's data
+    weekly_df = merged_df.resample('W-MON', label="left", closed="left").last()
+    row_df = weekly_df[weekly_df.index == week_start]
+    
+    if row_df.empty:
+        if not weekly_df.empty:
+             row_df = weekly_df.iloc[[-1]]
+        else:
+             print("⚠️ No weekly data available to insert.")
+             return
+             
+    final_row = row_df.iloc[0].to_dict()
+    final_row['week_start'] = row_df.index[0]
+    
+    # Apply the float conversion fix
+    for key, value in final_row.items():
+        if key != 'week_start':
+            final_row[key] = to_python_float(value)
+    
+    for col in SCHEMA_COLUMNS:
+        if col not in final_row:
+            final_row[col] = None
 
     print("Connecting to database...")
     try:
         with get_db_connection() as conn:
             print("✅ Database connection successful.")
-            _create_table_if_missing(conn)
-            # Loop to insert each row individually using your original _init_db logic
-            for row_data in data_to_upsert:
-                _init_db(conn, row_data)
-        print(f"✅ Successfully ingested and upserted {len(data_to_upsert)} weeks of data.")
+            _init_db(conn, final_row)
+        print(f"✅ Successfully ingested and upserted data for week starting {final_row['week_start'].date()}.")
     except Exception as e:
         print(f"❌ An error occurred during the database operation: {e}")
 
