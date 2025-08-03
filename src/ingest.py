@@ -57,9 +57,10 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name
         df = pd.read_csv(io.StringIO(resp.text), index_col=0, parse_dates=True)
         df.columns = [col_name]
         df[col_name] = pd.to_numeric(df[col_name], errors='coerce')
+        print(f"✅ Successfully fetched {len(df)} rows for {col_name} from FRED.")
         return df
     except Exception as e:
-        print(f"Failed to fetch FRED series {series_id}: {e}")
+        print(f"❌ Failed to fetch FRED series {series_id}: {e}")
     return pd.DataFrame()
 
 async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
@@ -83,9 +84,10 @@ async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, en
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df["realised_price"] = df["CapRealUSD"] / df["SplyCur"]
         df["nupl"] = (df["CapMrktCurUSD"] - df["CapRealUSD"]) / df["CapMrktCurUSD"]
+        print(f"✅ Successfully fetched {len(df)} rows from CoinMetrics.")
         return df[["realised_price", "nupl"]]
     except Exception as e:
-        print(f"Failed to fetch CoinMetrics data: {e}")
+        print(f"❌ Failed to fetch CoinMetrics data: {e}")
     return pd.DataFrame()
 
 def _get_yfinance_data(ticker, start_date, end_date, column_name):
@@ -93,23 +95,23 @@ def _get_yfinance_data(ticker, start_date, end_date, column_name):
     try:
         data = yf.download(ticker, start=start_date, end=end_date, auto_adjust=True, progress=False)
         if not data.empty:
+            print(f"✅ Successfully fetched {len(data)} rows for {column_name} from Yahoo Finance.")
             df = data[['Close']].copy()
             df.columns = [column_name]
             return df
     except Exception as e:
-        print(f"An error occurred fetching {ticker} from Yahoo Finance: {e}")
+        print(f"❌ An error occurred fetching {ticker} from Yahoo Finance: {e}")
     return pd.DataFrame()
 
-# --- Main Ingestion Function (Now an async function) ---
+# --- Main Ingestion Function ---
 async def ingest_weekly(week_anchor, years=1):
     """Main async function to ingest weekly data and upsert to database."""
     end_date = week_anchor
     start_date = end_date - timedelta(days=365 * years)
 
-    print("Fetching market data...")
+    print("--- Starting Data Ingestion ---")
     async with httpx.AsyncClient() as client:
         loop = asyncio.get_running_loop()
-        # Create all fetching tasks
         tasks = {
             "cm": _fetch_coinmetrics(client, start_date, end_date),
             "fed_liq": _fetch_fred_series(client, "WALCL", "fed_liq"),
@@ -127,13 +129,25 @@ async def ingest_weekly(week_anchor, years=1):
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
-    # Merge all dataframes
+    print("\n--- Merging Data ---")
     merged_df = pd.concat([df for df in dataframes.values() if not df.empty], axis=1)
+    print(f"Merged dataframe has {len(merged_df)} rows before cleaning.")
+    
     merged_df.ffill(inplace=True)
     merged_df.dropna(subset=['close_usd'], inplace=True)
+    print(f"Cleaned dataframe has {len(merged_df)} rows.")
 
     if merged_df.empty:
         print("No data to process after merging. Aborting.")
         return
 
-    weekly_
+    weekly_df = merged_df.resample('W-MON').last()
+    print(f"Resampled to {len(weekly_df)} weekly rows.")
+
+    print("\n--- Connecting to Database ---")
+    try:
+        with get_db_connection() as conn:
+            print("✅ Database connection successful.")
+            create_table_if_not_exists(conn)
+            with conn.cursor() as cur:
+                data_to_ups
