@@ -14,8 +14,6 @@ def _sample_df(rows: int = 60) -> pd.DataFrame:
         "close_usd": np.linspace(100, 200, rows),
         "realised_price": np.linspace(90, 180, rows),
         "nupl": np.linspace(0, 1, rows),
-        "fed_liq": np.arange(rows, dtype=float),
-        "ecb_liq": np.arange(rows, dtype=float),
         "dxy": np.linspace(90, 100, rows),
         "ust10": np.linspace(2, 3, rows),
         "gold_price": np.linspace(1500, 1600, rows),

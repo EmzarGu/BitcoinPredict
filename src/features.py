@@ -15,14 +15,10 @@ FEATURE_COLS: List[str] = [
     "Momentum_26w",
     "Realised_Price_Delta",
     "nupl",
-    "fed_liq_z",
-    "ecb_liq_z",
     "dxy_z",
     "ust10_z",
     "gold_price_z",
     "spx_index_z",
-    "Combined_Liq",
-    "Liq_Change",
     "DXY_Invert",
     "Target",
 ]
@@ -36,7 +32,7 @@ def _load_btc_weekly() -> pd.DataFrame:
             conn = psycopg2.connect(db_url)
             query = (
                 "SELECT week_start, close_usd, realised_price, nupl, "
-                "fed_liq, ecb_liq, dxy, ust10, gold_price, spx_index "
+                "dxy, ust10, gold_price, spx_index "
                 "FROM btc_weekly ORDER BY week_start"
             )
             df = pd.read_sql(query, conn)
@@ -59,8 +55,6 @@ def _load_btc_weekly() -> pd.DataFrame:
             "close_usd",
             "realised_price",
             "nupl",
-            "fed_liq",
-            "ecb_liq",
             "dxy",
             "ust10",
             "gold_price",
@@ -83,12 +77,9 @@ def build_features(lookback_weeks: int = 260) -> pd.DataFrame:
 
     df["Realised_Price_Delta"] = df["close_usd"] / df["realised_price"] - 1
 
-    for col in ["fed_liq", "ecb_liq", "dxy", "ust10", "gold_price", "spx_index"]:
+    for col in ["dxy", "ust10", "gold_price", "spx_index"]:
         rolling = df[col].rolling(window=52)
         df[f"{col}_z"] = (df[col] - rolling.mean()) / rolling.std()
-
-    df["Combined_Liq"] = df["fed_liq"] + df["ecb_liq"]
-    df["Liq_Change"] = df["Combined_Liq"].pct_change(52)
     df["DXY_Invert"] = 1 / df["dxy"]
 
     df["Target"] = df["close_usd"].shift(-4) / df["close_usd"] - 1
