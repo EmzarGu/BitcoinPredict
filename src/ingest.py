@@ -3,26 +3,30 @@ import io
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List
 
 import httpx
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+import psycopg2.extensions
 import yfinance as yf
-from dotenv import load_dotenv
 from yfinance.exceptions import YFPricesMissingError
+from dotenv import load_dotenv
 
-# This loads your DATABASE_URL and any API keys from your .env file
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_COLUMNS: list[str] = [
+SCHEMA_COLUMNS: List[str] = [
     "week_start", "close_usd", "realised_price", "nupl", "fed_liq",
     "ecb_liq", "dxy", "ust10", "gold_price", "spx_index",
 ]
 
-# --- Helper Function to Fix the Database Data Type Bug ---
+COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
+FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+
+# --- Helper Function to Fix Database Data Type Bug ---
 def to_python_float(value):
     """Converts a pandas/numpy number to a standard Python float, or None."""
     if pd.isna(value) or value is None:
@@ -37,7 +41,7 @@ def get_db_connection():
         raise ValueError("DATABASE_URL not found. Please check your .env file.")
     return psycopg2.connect(database_url)
 
-def _create_table_if_missing(conn):
+def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
     """Create the ``btc_weekly`` table if it doesn't exist."""
     create_sql = """
     CREATE TABLE IF NOT EXISTS btc_weekly (
@@ -50,7 +54,7 @@ def _create_table_if_missing(conn):
         cur.execute(create_sql)
     conn.commit()
 
-def _init_db(conn, row: dict):
+def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
     """Ensure table exists and upsert a single row."""
     _create_table_if_missing(conn)
     columns = ",".join(SCHEMA_COLUMNS)
@@ -65,16 +69,15 @@ def _init_db(conn, row: dict):
         )
     conn.commit()
 
-
 # --- All Data Fetching Functions (Restored to your original, robust logic) ---
 async def _fetch_yahoo_data(ticker: str, start: datetime, end: datetime, col_name: str) -> pd.DataFrame:
-    """Fetches data from Yahoo Finance using the original robust method."""
+    """Fetches data from Yahoo Finance using your original robust method."""
     try:
         raw = await asyncio.to_thread(yf.download, ticker, start=start, end=end, auto_adjust=True, progress=False)
         if raw.empty:
             return pd.DataFrame()
         
-        # This robust column handling is from your original script
+        # This robust column handling is from your original script and fixes the errors.
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.droplevel(0)
         
@@ -99,8 +102,7 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name
         resp = await client.get(url, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text), index_col=0, parse_dates=True)
-        # FIX: This line adds the missing timezone information to prevent the TypeError
-        df.index = df.index.tz_localize('UTC')
+        df.index = df.index.tz_localize('UTC') # FIX: Add timezone info
         df.columns = [col_name]
         df[col_name] = pd.to_numeric(df[col_name], errors='coerce')
         return df
@@ -119,7 +121,7 @@ async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, en
         "end_time": end_date.strftime("%Y-%m-%d"),
     }
     try:
-        resp = await client.get("https://community-api.coinmetrics.io/v4/timeseries/asset-metrics", params=params, timeout=30)
+        resp = await client.get(COINMETRICS_URL, params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json().get("data", [])
         if not data: return pd.DataFrame()
@@ -136,7 +138,7 @@ async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, en
     return pd.DataFrame()
 
 
-# --- Main Ingestion Logic ---
+# --- Main Ingestion Logic (Based on your original) ---
 async def ingest_weekly(week_anchor=None, years=1):
     """Main async function to ingest weekly data and upsert to database."""
     now = week_anchor or datetime.now(timezone.utc)
@@ -179,14 +181,12 @@ async def ingest_weekly(week_anchor=None, years=1):
     row_df = df_weekly[df_weekly.index == week_start]
     
     if row_df.empty:
-        # If the exact week start isn't there, take the last available full week
         if not df_weekly.empty:
              row_df = df_weekly.iloc[[-1]]
         else:
              print("⚠️ No weekly data available to insert.")
              return
              
-    # Prepare the final row for insertion
     final_row = row_df.iloc[0].to_dict()
     final_row['week_start'] = row_df.index[0]
     
@@ -195,7 +195,6 @@ async def ingest_weekly(week_anchor=None, years=1):
         if key != 'week_start':
             final_row[key] = to_python_float(value)
     
-    # Ensure all schema columns are present
     for col in SCHEMA_COLUMNS:
         if col not in final_row:
             final_row[col] = None
@@ -212,6 +211,7 @@ async def ingest_weekly(week_anchor=None, years=1):
 
 # This block allows running the script from the command line
 if __name__ == "__main__":
+    import argparse
     parser = argparse.ArgumentParser(description='Ingest historical market data.')
     parser.add_argument('--years', type=int, default=1, help='Number of years of historical data to fetch.')
     args = parser.parse_args()
