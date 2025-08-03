@@ -66,7 +66,6 @@ async def _fetch_yahoo_data(ticker: str, start: datetime, end: datetime, col_nam
         df.columns = [col_name]
         df.index = pd.to_datetime(df.index, utc=True)
         return df
-
     except Exception as e:
         logger.warning(f"Failed to fetch {ticker} from Yahoo Finance: {e}")
     return pd.DataFrame()
