@@ -233,7 +233,7 @@ async def _fetch_yahoo_series(ticker: str, column_name: str) -> pd.DataFrame:
 
 async def _fetch_yahoo_gold() -> pd.DataFrame:
     """Fetch GLD (gold ETF) prices from Yahoo Finance and resample to weekly."""
-    return await _fetch_yahoo_series("GLD", "gold_price")
+    return await _fetch_yahoo_series("XAUUSD=X", "gold_price")
 
 
 async def _fetch_yahoo_btc(
