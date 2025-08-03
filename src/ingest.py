@@ -1,5 +1,4 @@
 import asyncio
-import io
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -33,7 +32,7 @@ SCHEMA_COLUMNS: List[str] = [
 
 COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
 COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
-FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
 FRED_API_KEY = os.getenv("FRED_API_KEY")
 
 
@@ -318,17 +317,21 @@ async def _fetch_yahoo_btc(
 
 
 async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.DataFrame:
-    url = FRED_URL.format(series_id=series_id)
+    params = {"series_id": series_id, "file_type": "json"}
     if FRED_API_KEY:
-        url += f"&api_key={FRED_API_KEY}"
+        params["api_key"] = FRED_API_KEY
     column_name = FRED_COLUMN_MAP.get(series_id, series_id.lower())
-    resp = await client.get(url, timeout=30)
+    resp = await client.get(FRED_URL, params=params, timeout=30)
     resp.raise_for_status()
-    df = pd.read_csv(io.StringIO(resp.text))
-    df.columns = [c.lower() for c in df.columns]
-    # Rename the first column to "date" since FRED uses "observation_date"
-    df.rename(columns={df.columns[0]: "date", df.columns[1]: column_name}, inplace=True)
+    payload = resp.json()
+    observations = payload.get("observations", [])
+    df = pd.DataFrame(observations)
+    if df.empty or "date" not in df.columns:
+        logger.warning("Unexpected FRED payload for %s", series_id)
+        empty_index = pd.DatetimeIndex([], tz="UTC")
+        return pd.DataFrame(columns=[column_name], index=empty_index)
     df["date"] = pd.to_datetime(df["date"], utc=True)
+    df[column_name] = pd.to_numeric(df.get("value", pd.NA), errors="coerce")
     df = df.set_index("date").resample("W-MON", label="left", closed="left").last()
     logger.info("Fetched %s rows for %s", len(df), series_id)
     if df.empty:
@@ -352,6 +355,8 @@ async def _fetch_with_retry(func, *, name: str, columns: List[str], fallback=Non
                 status = exc.response.status_code
                 retryable = status >= 500 or status == 429
                 if not retryable:
+                    if fallback is not None:
+                        return await fallback()
                     raise
             if attempt < 2 and retryable:
                 await asyncio.sleep(delay)
