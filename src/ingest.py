@@ -29,7 +29,6 @@ COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metr
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 FRED_API_KEY = os.getenv("FRED_API_KEY")
 
-
 # This mapping is from your original script
 FRED_COLUMN_MAP = {
     "WALCL": "fed_liq", "ECBASSETS": "ecb_liq", "DTWEXBGS": "dxy",
@@ -79,9 +78,10 @@ def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
         )
     conn.commit()
 
+
 # --- All Data Fetching Functions (Restored to your original, robust logic) ---
 
-async def _fetch_yahoo_gold(start: datetime, end: datetime) -> pd.DataFrame:
+async def _fetch_yahoo_gold(start, end) -> pd.DataFrame:
     """Specific fetcher for Gold from Yahoo as a fallback."""
     try:
         raw = await asyncio.to_thread(yf.download, "GC=F", start=start, end=end, auto_adjust=True, progress=False)
@@ -202,7 +202,7 @@ async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, en
 async def ingest_weekly(week_anchor=None, years=1):
     """Main async function to ingest weekly data and upsert to database."""
     now = week_anchor or datetime.now(timezone.utc)
-    week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start_date = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     end_date = now
     start_date = end_date - timedelta(days=365 * years)
 
@@ -238,7 +238,7 @@ async def ingest_weekly(week_anchor=None, years=1):
         print("No data to process after merging. Aborting.")
         return
     
-    # This logic correctly processes all weeks of data, not just one row
+    # This logic correctly processes all weeks of data for backfill
     weekly_df = merged_df.resample('W-MON', label="left", closed="left").last()
     
     data_to_upsert = []
