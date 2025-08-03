@@ -1,4 +1,5 @@
 import pandas as pd
+import pandas as pd
 import pytest
 from datetime import datetime, timezone, timedelta
 
@@ -18,14 +19,13 @@ async def test_forward_fill(monkeypatch):
         df = pd.DataFrame({"realised_price": [1], "nupl": [0]}, index=[week_start])
         return df
 
-    async def fake_fetch_fred_series(client, series_id):
-        col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
-        df = pd.DataFrame({col: [5]}, index=[prev_week])
+    async def fake_fetch_yahoo_series(ticker, column_name):
+        df = pd.DataFrame({column_name: [5]}, index=[prev_week])
         return df
 
     monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
     monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
-    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_series", fake_fetch_yahoo_series)
 
     df = await ingest.ingest_weekly()
     assert df["gold_price"].isna().sum() == 0
@@ -42,15 +42,14 @@ async def test_week_start_present(monkeypatch):
         df = pd.DataFrame({"realised_price": [1], "nupl": [1]}, index=[week])
         return df
 
-    async def fake_fetch_fred_series(client, series_id):
+    async def fake_fetch_yahoo_series(ticker, column_name):
         week = pd.Timestamp("2024-01-01", tz="UTC")
-        col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
-        df = pd.DataFrame({col: [1]}, index=[week])
+        df = pd.DataFrame({column_name: [1]}, index=[week])
         return df
 
     monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
     monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
-    monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_series", fake_fetch_yahoo_series)
 
     df = await ingest.ingest_weekly()
     assert df["week_start"].notna().all()
