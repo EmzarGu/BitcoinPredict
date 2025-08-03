@@ -47,7 +47,7 @@ def to_python_float(value):
         return None
     return float(value)
 
-# --- Restored Data Fetching Logic from Original Script ---
+# --- Restored Data Fetching Logic ---
 async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name: str) -> pd.DataFrame:
     """Fetches a single data series from FRED."""
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
@@ -60,7 +60,7 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name
         return df
     except Exception as e:
         print(f"Failed to fetch FRED series {series_id}: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
     """Fetches on-chain metrics from CoinMetrics."""
@@ -75,22 +75,18 @@ async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, en
         resp = await client.get("https://community-api.coinmetrics.io/v4/timeseries/asset-metrics", params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json().get("data", [])
-        if not data:
-            return pd.DataFrame()
-            
+        if not data: return pd.DataFrame()
         df = pd.DataFrame(data)
         df['date'] = pd.to_datetime(df['time'], utc=True)
         df = df.set_index('date')
-        
         for col in ["CapRealUSD", "SplyCur", "CapMrktCurUSD"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-            
         df["realised_price"] = df["CapRealUSD"] / df["SplyCur"]
         df["nupl"] = (df["CapMrktCurUSD"] - df["CapRealUSD"]) / df["CapMrktCurUSD"]
         return df[["realised_price", "nupl"]]
     except Exception as e:
         print(f"Failed to fetch CoinMetrics data: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 def _get_yfinance_data(ticker, start_date, end_date, column_name):
     """Synchronous version for yfinance calls inside asyncio."""
@@ -104,94 +100,40 @@ def _get_yfinance_data(ticker, start_date, end_date, column_name):
         print(f"An error occurred fetching {ticker} from Yahoo Finance: {e}")
     return pd.DataFrame()
 
-# --- Main Ingestion Function ---
-async def _ingest_async(week_anchor, years=1):
+# --- Main Ingestion Function (Now an async function) ---
+async def ingest_weekly(week_anchor, years=1):
+    """Main async function to ingest weekly data and upsert to database."""
     end_date = week_anchor
     start_date = end_date - timedelta(days=365 * years)
 
     print("Fetching market data...")
-    # Using an async client for FRED and CoinMetrics
     async with httpx.AsyncClient() as client:
-        # Create tasks for all concurrent fetches
-        cm_task = _fetch_coinmetrics(client, start_date, end_date)
-        fed_liq_task = _fetch_fred_series(client, "WALCL", "fed_liq")
-        ecb_liq_task = _fetch_fred_series(client, "ECBASSETS", "ecb_liq")
-        
-        # Run yfinance fetches in a thread to avoid blocking
         loop = asyncio.get_running_loop()
-        btc_df = await loop.run_in_executor(None, _get_yfinance_data, 'BTC-USD', start_date, end_date, 'close_usd')
-        gold_df = await loop.run_in_executor(None, _get_yfinance_data, 'GC=F', start_date, end_date, 'gold_price')
-        spx_df = await loop.run_in_executor(None, _get_yfinance_data, '^GSPC', start_date, end_date, 'spx_index')
-        dxy_df = await loop.run_in_executor(None, _get_yfinance_data, 'DX-Y.NYB', start_date, end_date, 'dxy')
-        ust10_df = await loop.run_in_executor(None, _get_yfinance_data, '^TNX', start_date, end_date, 'ust10')
-        
-        cm_df, fed_liq_df, ecb_liq_df = await asyncio.gather(cm_task, fed_liq_task, ecb_liq_task)
+        # Create all fetching tasks
+        tasks = {
+            "cm": _fetch_coinmetrics(client, start_date, end_date),
+            "fed_liq": _fetch_fred_series(client, "WALCL", "fed_liq"),
+            "ecb_liq": _fetch_fred_series(client, "ECBASSETS", "ecb_liq"),
+            "btc": loop.run_in_executor(None, _get_yfinance_data, 'BTC-USD', start_date, end_date, 'close_usd'),
+            "gold": loop.run_in_executor(None, _get_yfinance_data, 'GC=F', start_date, end_date, 'gold_price'),
+            "spx": loop.run_in_executor(None, _get_yfinance_data, '^GSPC', start_date, end_date, 'spx_index'),
+            "dxy": loop.run_in_executor(None, _get_yfinance_data, 'DX-Y.NYB', start_date, end_date, 'dxy'),
+            "ust10": loop.run_in_executor(None, _get_yfinance_data, '^TNX', start_date, end_date, 'ust10'),
+        }
+        results = await asyncio.gather(*tasks.values())
+        dataframes = dict(zip(tasks.keys(), results))
 
-    if btc_df.empty:
+    if dataframes["btc"].empty:
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
     # Merge all dataframes
-    all_dfs = [btc_df, cm_df, fed_liq_df, ecb_liq_df, gold_df, spx_df, dxy_df, ust10_df]
-    # Use reduce for cleaner merging of multiple frames
-    merged_df = pd.concat([df for df in all_dfs if not df.empty], axis=1)
-
+    merged_df = pd.concat([df for df in dataframes.values() if not df.empty], axis=1)
     merged_df.ffill(inplace=True)
-    merged_df.dropna(subset=['close_usd'], inplace=True) # Only drop if core data is missing
+    merged_df.dropna(subset=['close_usd'], inplace=True)
 
     if merged_df.empty:
         print("No data to process after merging. Aborting.")
         return
 
-    weekly_df = merged_df.resample('W-MON').last()
-
-    # --- Upsert to Database ---
-    print("Connecting to database...")
-    try:
-        with get_db_connection() as conn:
-            print("✅ Database connection successful.")
-            create_table_if_not_exists(conn)
-            with conn.cursor() as cur:
-                data_to_upsert = [
-                    (
-                        idx,
-                        to_python_float(row.get('close_usd')),
-                        to_python_float(row.get('realised_price')),
-                        to_python_float(row.get('nupl')),
-                        to_python_float(row.get('fed_liq')),
-                        to_python_float(row.get('ecb_liq')),
-                        to_python_float(row.get('dxy')),
-                        to_python_float(row.get('ust10')),
-                        to_python_float(row.get('gold_price')),
-                        to_python_float(row.get('spx_index'))
-                    )
-                    for idx, row in weekly_df.iterrows()
-                ]
-
-                execute_values(
-                    cur,
-                    """
-                    INSERT INTO btc_weekly (week_start, close_usd, realised_price, nupl, fed_liq, ecb_liq, dxy, ust10, gold_price, spx_index)
-                    VALUES %s
-                    ON CONFLICT (week_start) DO UPDATE SET
-                        close_usd = EXCLUDED.close_usd, realised_price = EXCLUDED.realised_price, nupl = EXCLUDED.nupl,
-                        fed_liq = EXCLUDED.fed_liq, ecb_liq = EXCLUDED.ecb_liq, dxy = EXCLUDED.dxy,
-                        ust10 = EXCLUDED.ust10, gold_price = EXCLUDED.gold_price, spx_index = EXCLUDED.spx_index;
-                    """,
-                    data_to_upsert
-                )
-            conn.commit()
-        print(f"✅ Successfully ingested and upserted {len(weekly_df)} weeks of data.")
-    except Exception as e:
-        print(f"❌ An error occurred during the database operation: {e}")
-
-def ingest_weekly(week_anchor, years=1):
-    """Public wrapper to run the async ingestion logic."""
-    asyncio.run(_ingest_async(week_anchor, years))
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Ingest historical market data into the database.')
-    parser.add_argument('--years', type=int, default=1, help='Number of years of historical data to fetch.')
-    args = parser.parse_args()
-
-    ingest_weekly(datetime.now(timezone.utc), years=args.years)
+    weekly_
