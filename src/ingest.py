@@ -3,24 +3,29 @@ import io
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List
 
 import httpx
 import pandas as pd
 import psycopg2
 import psycopg2.extras
+import psycopg2.extensions
 import yfinance as yf
-from dotenv import load_dotenv
 from yfinance.exceptions import YFPricesMissingError
+from dotenv import load_dotenv
 
 # This loads your DATABASE_URL and any API keys from your .env file
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_COLUMNS: list[str] = [
+SCHEMA_COLUMNS: List[str] = [
     "week_start", "close_usd", "realised_price", "nupl", "fed_liq",
     "ecb_liq", "dxy", "ust10", "gold_price", "spx_index",
 ]
+
+COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
+FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 
 # --- Helper Function to Fix the Database Data Type Bug ---
 def to_python_float(value):
@@ -37,7 +42,7 @@ def get_db_connection():
         raise ValueError("DATABASE_URL not found. Please check your .env file.")
     return psycopg2.connect(database_url)
 
-def _create_table_if_missing(conn):
+def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
     """Create the ``btc_weekly`` table if it doesn't exist."""
     create_sql = """
     CREATE TABLE IF NOT EXISTS btc_weekly (
@@ -50,38 +55,18 @@ def _create_table_if_missing(conn):
         cur.execute(create_sql)
     conn.commit()
 
-def _init_db(conn, row: dict):
-    """Ensure table exists and upsert a single row."""
-    _create_table_if_missing(conn)
-    columns = ",".join(SCHEMA_COLUMNS)
-    update = ",".join([f"{c} = EXCLUDED.{c}" for c in SCHEMA_COLUMNS[1:]])
-    with conn.cursor() as cur:
-        template = "(" + ",".join([f"%({col})s" for col in SCHEMA_COLUMNS]) + ")"
-        psycopg2.extras.execute_values(
-            cur,
-            f"INSERT INTO btc_weekly ({columns}) VALUES %s ON CONFLICT (week_start) DO UPDATE SET {update}",
-            [row],
-            template=template,
-        )
-    conn.commit()
-
-
 # --- All Data Fetching Functions (Restored to your original, robust logic) ---
 async def _fetch_yahoo_data(ticker: str, start: datetime, end: datetime, col_name: str) -> pd.DataFrame:
-    """Fetches data from Yahoo Finance using the original robust method."""
+    """Fetches data from Yahoo Finance using your original robust method."""
     try:
         raw = await asyncio.to_thread(yf.download, ticker, start=start, end=end, auto_adjust=True, progress=False)
-        if raw.empty:
-            return pd.DataFrame()
+        if raw.empty: return pd.DataFrame()
         
-        # This robust column handling is from your original script
         if isinstance(raw.columns, pd.MultiIndex):
             raw.columns = raw.columns.droplevel(0)
         
-        price_col = 'Close'
-        if price_col not in raw.columns:
-            logger.warning(f"Yahoo Finance data for {ticker} missing Close column")
-            return pd.DataFrame()
+        price_col = 'Adj Close' if 'Adj Close' in raw.columns else 'Close'
+        if price_col not in raw.columns: return pd.DataFrame()
 
         df = raw[[price_col]].copy()
         df.columns = [col_name]
@@ -94,16 +79,15 @@ async def _fetch_yahoo_data(ticker: str, start: datetime, end: datetime, col_nam
 
 async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name: str) -> pd.DataFrame:
     """Fetches a single data series from FRED."""
-    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+    url = FRED_URL.format(series_id=series_id)
     try:
         resp = await client.get(url, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text), index_col=0, parse_dates=True)
-        # FIX: This line adds the missing timezone information to prevent the TypeError
-        df.index = df.index.tz_localize('UTC')
+        df.index = df.index.tz_localize('UTC') # FIX: Add timezone info
         df.columns = [col_name]
         df[col_name] = pd.to_numeric(df[col_name], errors='coerce')
-        return df
+        return df[[col_name]]
     except Exception as e:
         logger.warning(f"Failed to fetch FRED series {series_id}: {e}")
     return pd.DataFrame()
@@ -111,15 +95,9 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name
 
 async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
     """Fetches on-chain metrics from CoinMetrics."""
-    params = {
-        "assets": "btc",
-        "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD",
-        "frequency": "1d",
-        "start_time": start_date.strftime("%Y-%m-%d"),
-        "end_time": end_date.strftime("%Y-%m-%d"),
-    }
+    params = {"assets": "btc", "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD", "frequency": "1d", "start_time": start_date.strftime("%Y-%m-%d"), "end_time": end_date.strftime("%Y-%m-%d")}
     try:
-        resp = await client.get("https://community-api.coinmetrics.io/v4/timeseries/asset-metrics", params=params, timeout=30)
+        resp = await client.get(COINMETRICS_URL, params=params, timeout=30)
         resp.raise_for_status()
         data = resp.json().get("data", [])
         if not data: return pd.DataFrame()
@@ -136,18 +114,16 @@ async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, en
     return pd.DataFrame()
 
 
-# --- Main Ingestion Logic ---
+# --- Main Ingestion Logic (Corrected for full backfill) ---
 async def ingest_weekly(week_anchor=None, years=1):
     """Main async function to ingest weekly data and upsert to database."""
     now = week_anchor or datetime.now(timezone.utc)
-    week_start = (now - timedelta(days=now.weekday())).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    )
     end_date = now
     start_date = end_date - timedelta(days=365 * years)
 
     print("Fetching market data...")
     async with httpx.AsyncClient(follow_redirects=True) as client:
+        # Using reliable sources as per your original script's intent
         tasks = {
             "btc": _fetch_yahoo_data('BTC-USD', start_date, end_date, 'close_usd'),
             "cm": _fetch_coinmetrics(client, start_date, end_date),
@@ -155,8 +131,8 @@ async def ingest_weekly(week_anchor=None, years=1):
             "ecb_liq": _fetch_fred_series(client, "ECBASSETS", "ecb_liq"),
             "dxy": _fetch_fred_series(client, "DTWEXBGS", "dxy"),
             "ust10": _fetch_fred_series(client, "DGS10", "ust10"),
-            "gold": _fetch_yahoo_data('GC=F', start_date, end_date, 'gold_price'), # Using Yahoo for gold as a reliable source
-            "spx": _fetch_yahoo_data('^GSPC', start_date, end_date, 'spx_index'),
+            "gold": _fetch_yahoo_data('GC=F', start_date, end_date, 'gold_price'), # FIX: Using Yahoo for Gold
+            "spx": _fetch_fred_series(client, "SP500", "spx_index"),
         }
         results = await asyncio.gather(*tasks.values())
         dataframes = dict(zip(tasks.keys(), results))
@@ -174,35 +150,50 @@ async def ingest_weekly(week_anchor=None, years=1):
         print("No data to process after merging. Aborting.")
         return
 
-    # Resample and select the relevant week's data
+    # Resample to get weekly data
     weekly_df = merged_df.resample('W-MON', label="left", closed="left").last()
-    row_df = weekly_df[weekly_df.index == week_start]
     
-    if row_df.empty:
-        if not weekly_df.empty:
-             row_df = weekly_df.iloc[[-1]]
-        else:
-             print("⚠️ No weekly data available to insert.")
-             return
-             
-    final_row = row_df.iloc[0].to_dict()
-    final_row['week_start'] = row_df.index[0]
-    
-    # Apply the float conversion fix
-    for key, value in final_row.items():
-        if key != 'week_start':
-            final_row[key] = to_python_float(value)
-    
-    for col in SCHEMA_COLUMNS:
-        if col not in final_row:
-            final_row[col] = None
+    # --- FIX: Prepare all weekly rows for insertion ---
+    data_to_upsert = []
+    for idx, row in weekly_df.iterrows():
+        # Ensure we only insert data for the requested period
+        if idx.date() >= start_date.date():
+            row_dict = {
+                "week_start": idx,
+                "close_usd": to_python_float(row.get('close_usd')),
+                "realised_price": to_python_float(row.get('realised_price')),
+                "nupl": to_python_float(row.get('nupl')),
+                "fed_liq": to_python_float(row.get('fed_liq')),
+                "ecb_liq": to_python_float(row.get('ecb_liq')),
+                "dxy": to_python_float(row.get('dxy')),
+                "ust10": to_python_float(row.get('ust10')),
+                "gold_price": to_python_float(row.get('gold_price')),
+                "spx_index": to_python_float(row.get('spx_index')),
+            }
+            data_to_upsert.append(row_dict)
 
-    print("Connecting to database...")
+    if not data_to_upsert:
+        print("⚠️ No new weekly data to insert.")
+        return
+
+    print(f"Connecting to database to insert {len(data_to_upsert)} weekly records...")
     try:
         with get_db_connection() as conn:
             print("✅ Database connection successful.")
-            _init_db(conn, final_row)
-        print(f"✅ Successfully ingested and upserted data for week starting {final_row['week_start'].date()}.")
+            _create_table_if_missing(conn)
+            
+            # This logic correctly prepares all rows for a bulk insert
+            columns = data_to_upsert[0].keys()
+            update_str = ",".join([f"{c} = EXCLUDED.{c}" for c in columns if c != 'week_start'])
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    f"INSERT INTO btc_weekly ({', '.join(columns)}) VALUES %s ON CONFLICT (week_start) DO UPDATE SET {update_str}",
+                    [tuple(row.values()) for row in data_to_upsert],
+                )
+            conn.commit()
+
+        print(f"✅ Successfully ingested and upserted {len(data_to_upsert)} weeks of data.")
     except Exception as e:
         print(f"❌ An error occurred during the database operation: {e}")
 
