@@ -62,18 +62,21 @@ async def test_schema_columns(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_fred_series(monkeypatch):
-    csv = "DATE,WALCL\n2024-01-01,10\n"
+    payload = {"observations": [{"date": "2024-01-01", "value": "10"}]}
 
     class FakeResponse:
-        def __init__(self, text):
-            self.text = text
+        def __init__(self, payload):
+            self._payload = payload
 
         def raise_for_status(self):
             pass
 
+        def json(self):
+            return self._payload
+
     class FakeClient:
-        async def get(self, url, timeout=30):
-            return FakeResponse(csv)
+        async def get(self, url, params=None, timeout=30):
+            return FakeResponse(payload)
 
     df = await ingest._fetch_fred_series(FakeClient(), "WALCL")
     assert list(df.columns) == ["fed_liq"]
@@ -82,22 +85,25 @@ async def test_fetch_fred_series(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_fred_series_with_api_key(monkeypatch):
-    csv = "DATE,WALCL\n2024-01-01,10\n"
+    payload = {"observations": [{"date": "2024-01-01", "value": "10"}]}
 
     class FakeResponse:
-        def __init__(self, text):
-            self.text = text
+        def __init__(self, payload):
+            self._payload = payload
 
         def raise_for_status(self):
             pass
 
+        def json(self):
+            return self._payload
+
     class FakeClient:
         def __init__(self):
-            self.urls = []
+            self.params = None
 
-        async def get(self, url, timeout=30):
-            self.urls.append(url)
-            return FakeResponse(csv)
+        async def get(self, url, params=None, timeout=30):
+            self.params = params
+            return FakeResponse(payload)
 
     client = FakeClient()
     monkeypatch.setattr(ingest, "FRED_API_KEY", "testkey")
@@ -105,7 +111,7 @@ async def test_fetch_fred_series_with_api_key(monkeypatch):
     df = await ingest._fetch_fred_series(client, "WALCL")
     assert list(df.columns) == ["fed_liq"]
     assert df.iloc[0]["fed_liq"] == 10
-    assert client.urls[0].endswith("&api_key=testkey")
+    assert client.params.get("api_key") == "testkey"
 
 
 @pytest.mark.asyncio
@@ -117,7 +123,7 @@ async def test_fetch_fred_series_error(monkeypatch):
             raise httpx.HTTPStatusError("error", request=None, response=self)
 
     class FakeClient:
-        async def get(self, url, timeout=30):
+        async def get(self, url, params=None, timeout=30):
             return FakeResponse()
     df = await ingest._fetch_with_retry(
         lambda: ingest._fetch_fred_series(FakeClient(), "WALCL"),
@@ -157,7 +163,7 @@ async def test_ingest_weekly_yields_prices(monkeypatch):
 @pytest.mark.asyncio
 async def test_fetch_fred_series_request_error(monkeypatch):
     class FakeClient:
-        async def get(self, url, timeout=30):
+        async def get(self, url, params=None, timeout=30):
             raise httpx.RequestError("boom", request=httpx.Request("GET", url))
     df = await ingest._fetch_with_retry(
         lambda: ingest._fetch_fred_series(FakeClient(), "WALCL"),
@@ -168,6 +174,31 @@ async def test_fetch_fred_series_request_error(monkeypatch):
     assert df.empty
     assert isinstance(df.index, pd.DatetimeIndex)
     assert df.index.tz == timezone.utc
+
+
+@pytest.mark.asyncio
+async def test_fred_404_triggers_fallback(monkeypatch):
+    class FakeResponse:
+        status_code = 404
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("not found", request=None, response=self)
+
+    class FakeClient:
+        async def get(self, url, params=None, timeout=30):
+            return FakeResponse()
+
+    async def fake_fallback():
+        week_start = pd.Timestamp(datetime.now(tz=timezone.utc))
+        return pd.DataFrame({"gold_price": [7]}, index=[week_start])
+
+    df = await ingest._fetch_with_retry(
+        lambda: ingest._fetch_fred_series(FakeClient(), "GOLDAMGBD228NLBM"),
+        name="fred_gold",
+        columns=["gold_price"],
+        fallback=fake_fallback,
+    )
+    assert df.iloc[0]["gold_price"] == 7
 
 
 @pytest.mark.asyncio
@@ -303,7 +334,7 @@ async def test_fred_fallback_to_yahoo(monkeypatch):
             raise httpx.HTTPStatusError("error", request=None, response=self)
 
     class FakeClient:
-        async def get(self, url, timeout=30):
+        async def get(self, url, params=None, timeout=30):
             return FakeResponse()
 
     async def fake_yahoo():
@@ -322,7 +353,7 @@ async def test_fred_fallback_to_yahoo(monkeypatch):
 @pytest.mark.asyncio
 async def test_fred_fallback_to_yahoo_request_error(monkeypatch):
     class FakeClient:
-        async def get(self, url, timeout=30):
+        async def get(self, url, params=None, timeout=30):
             raise httpx.RequestError("boom", request=httpx.Request("GET", url))
 
     async def fake_yahoo():
@@ -343,7 +374,7 @@ async def test_fetch_fred_series_request_error_gold_fallback(monkeypatch):
     """RequestError should trigger Yahoo fallback for the gold series."""
 
     class FakeClient:
-        async def get(self, url, timeout=30):
+        async def get(self, url, params=None, timeout=30):
             raise httpx.RequestError("boom", request=httpx.Request("GET", url))
 
     async def fake_yahoo():
