@@ -50,18 +50,27 @@ def create_table_if_not_exists(conn):
         """)
         conn.commit()
 
-# --- All Data Fetching Functions ---
+# --- All Data Fetching Functions (Restored to your original, robust logic) ---
 async def _fetch_yahoo_data(ticker: str, start: datetime, end: datetime, col_name: str) -> pd.DataFrame:
-    """Fetches data from Yahoo Finance."""
+    """Fetches data from Yahoo Finance using the original robust method."""
     try:
-        data = await asyncio.to_thread(yf.download, ticker, start=start, end=end, auto_adjust=True, progress=False)
-        if not data.empty:
-            df = data[['Close']].copy()
-            df.columns = [col_name]
-            return df
+        raw = await asyncio.to_thread(yf.download, ticker, start=start, end=end, auto_adjust=True, progress=False)
+        if raw.empty:
+            return pd.DataFrame()
+
+        # This robust column handling is from your original script and fixes the errors.
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.droplevel(0)
+        
+        df = raw[['Close']].copy()
+        df.columns = [col_name]
+        df.index = pd.to_datetime(df.index, utc=True)
+        return df
+
     except Exception as e:
         logger.warning(f"Failed to fetch {ticker} from Yahoo Finance: {e}")
     return pd.DataFrame()
+
 
 async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name: str) -> pd.DataFrame:
     """Fetches a single data series from FRED."""
@@ -70,6 +79,7 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name
         resp = await client.get(url, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text), index_col=0, parse_dates=True)
+        df.index = df.index.tz_localize('UTC') # Fix for timezone issue
         df.columns = [col_name]
         df[col_name] = pd.to_numeric(df[col_name], errors='coerce')
         return df
@@ -128,19 +138,8 @@ async def ingest_weekly(week_anchor, years=1):
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
-    # --- Definitive Timezone Fix ---
-    # This loop forces every dataframe to have a UTC timezone before merging.
-    processed_dfs = []
-    for name, df in dataframes.items():
-        if not df.empty:
-            if df.index.tz is None:
-                df.index = df.index.tz_localize('UTC')
-            else:
-                df.index = df.index.tz_convert('UTC')
-            processed_dfs.append(df)
-
     # Correctly merge all dataframes
-    merged_df = pd.concat(processed_dfs, axis=1)
+    merged_df = pd.concat([df for df in dataframes.values() if not df.empty], axis=1)
     merged_df.ffill(inplace=True)
     merged_df.dropna(subset=['close_usd'], inplace=True) # Ensure core data exists
 
