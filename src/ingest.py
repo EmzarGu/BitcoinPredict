@@ -22,6 +22,8 @@ SCHEMA_COLUMNS: List[str] = [
     "close_usd",
     "realised_price",
     "nupl",
+    "fed_liq",
+    "ecb_liq",
     "dxy",
     "ust10",
     "gold_price",
@@ -30,6 +32,18 @@ SCHEMA_COLUMNS: List[str] = [
 
 COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
 COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
+FRED_URL = "https://api.stlouisfed.org/fred/series/observations"
+FRED_API_KEY = os.getenv("FRED_API_KEY")
+
+
+# Mapping of FRED series IDs to dataframe column names
+FRED_COLUMN_MAP = {
+    "WALCL": "fed_liq",
+    "ECBASSETS": "ecb_liq",
+    "DTWEXBGS": "dxy",
+    "DGS10": "ust10",
+    "SP500": "spx_index",
+}
 
 
 async def _fetch_coingecko(
@@ -172,27 +186,28 @@ async def _fetch_coinmetrics(
     return df[["realised_price", "nupl"]]
 
 
-async def _fetch_yahoo_series(ticker: str, column_name: str) -> pd.DataFrame:
-    """Fetch a ticker from Yahoo Finance and resample to weekly."""
+async def _fetch_yahoo_gold() -> pd.DataFrame:
+    """Fetch GLD (gold ETF) prices from Yahoo Finance and resample to weekly."""
     start = pd.Timestamp.utcnow().normalize().to_pydatetime().replace(tzinfo=None)
     try:
         raw = await asyncio.to_thread(
             yf.download,
-            ticker,
+            "GLD",
             period="1mo",
             interval="1d",
             auto_adjust=False,
         )
     except YFPricesMissingError:
-        logger.warning("Failed to fetch %s from Yahoo Finance", ticker)
+        logger.warning("Failed to fetch gold price from Yahoo Finance")
         return pd.DataFrame(
-            {column_name: [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")]
+            {"gold_price": [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")]
         )
     except Exception:
-        logger.warning("Failed to fetch %s from Yahoo Finance", ticker)
+        logger.warning("Failed to fetch gold price from Yahoo Finance")
         empty_index = pd.DatetimeIndex([], tz="UTC")
-        return pd.DataFrame(columns=[column_name], index=empty_index)
+        return pd.DataFrame(columns=["gold_price"], index=empty_index)
 
+    # Flatten MultiIndex columns from yfinance (e.g. ('Adj Close', 'GLD'))
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.droplevel(1)
 
@@ -202,19 +217,21 @@ async def _fetch_yahoo_series(ticker: str, column_name: str) -> pd.DataFrame:
     elif "Close" in raw.columns:
         price_col = "Close"
     if price_col is None:
-        logger.warning("Yahoo Finance data missing Close column for %s", ticker)
+        logger.warning("Yahoo Finance data missing Close column")
         empty_index = pd.DatetimeIndex([], tz="UTC")
-        return pd.DataFrame(columns=[column_name], index=empty_index)
+        return pd.DataFrame(columns=["gold_price"], index=empty_index)
 
     if raw.empty:
         return pd.DataFrame(
-            {column_name: [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")]
+            {"gold_price": [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")]
         )
 
     series = raw[price_col]
+    # ``yfinance`` may return a DataFrame when multiple columns share the
+    # selected name. In that case pick the first column to obtain a Series.
     if isinstance(series, pd.DataFrame):
         series = series.iloc[:, 0]
-    series.name = column_name
+    series.name = "gold_price"
     series.index = pd.to_datetime(series.index, utc=True)
     df = (
         series
@@ -222,18 +239,13 @@ async def _fetch_yahoo_series(ticker: str, column_name: str) -> pd.DataFrame:
         .last()
         .to_frame()
     )
-    logger.info("Fetched %s rows for Yahoo %s", len(df), ticker)
+    logger.info("Fetched %s rows for Yahoo gold price", len(df))
     if df.empty:
         stub = pd.DataFrame(
-            {column_name: [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")]
+            {"gold_price": [pd.NA]}, index=[pd.Timestamp(start, tz="UTC")]
         )
         return stub
-    return df[[column_name]]
-
-
-async def _fetch_yahoo_gold() -> pd.DataFrame:
-    """Fetch GLD (gold ETF) prices from Yahoo Finance and resample to weekly."""
-    return await _fetch_yahoo_series("XAUUSD=X", "gold_price")
+    return df[["gold_price"]]
 
 
 async def _fetch_yahoo_btc(
@@ -303,6 +315,33 @@ async def _fetch_yahoo_btc(
     return df[["close_usd", "volume"]]
 
 
+async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.DataFrame:
+    params = {"series_id": series_id, "file_type": "json"}
+    if FRED_API_KEY:
+        params["api_key"] = FRED_API_KEY
+    column_name = FRED_COLUMN_MAP.get(series_id, series_id.lower())
+    resp = await client.get(FRED_URL, params=params, timeout=30)
+    resp.raise_for_status()
+    payload = resp.json()
+    observations = payload.get("observations", [])
+    df = pd.DataFrame(observations)
+    if df.empty or "date" not in df.columns:
+        logger.warning("Unexpected FRED payload for %s", series_id)
+        empty_index = pd.DatetimeIndex([], tz="UTC")
+        return pd.DataFrame(columns=[column_name], index=empty_index)
+    df["date"] = pd.to_datetime(df["date"], utc=True)
+    df[column_name] = pd.to_numeric(df.get("value", pd.NA), errors="coerce")
+    df = df.set_index("date").resample("W-MON", label="left", closed="left").last()
+    logger.info("Fetched %s rows for %s", len(df), series_id)
+    if df.empty:
+        stub = pd.DataFrame(
+            {column_name: [pd.NA]},
+            index=[pd.Timestamp.utcnow().normalize()],
+        )
+        return stub
+    return df[[column_name]]
+
+
 async def _fetch_with_retry(func, *, name: str, columns: List[str], fallback=None):
     """Retry wrapper for network fetchers."""
     delay = 1
@@ -348,6 +387,8 @@ def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
         close_usd DOUBLE PRECISION,
         realised_price DOUBLE PRECISION,
         nupl DOUBLE PRECISION,
+        fed_liq DOUBLE PRECISION,
+        ecb_liq DOUBLE PRECISION,
         dxy DOUBLE PRECISION,
         ust10 DOUBLE PRECISION,
         gold_price DOUBLE PRECISION,
@@ -435,18 +476,52 @@ async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
                     columns=["realised_price", "nupl"],
                 )
             )
-        dxy_task = asyncio.create_task(_fetch_yahoo_series("DX-Y.NYB", "dxy"))
-        ust10_task = asyncio.create_task(_fetch_yahoo_series("^TNX", "ust10"))
+        fed_liq_task = asyncio.create_task(
+            _fetch_with_retry(
+                lambda: _fetch_fred_series(client, "WALCL"),
+                name="fred",
+                columns=["fed_liq"],
+            )
+        )
+        ecb_liq_task = asyncio.create_task(
+            _fetch_with_retry(
+                lambda: _fetch_fred_series(client, "ECBASSETS"),
+                name="fred",
+                columns=["ecb_liq"],
+            )
+        )
+        dxy_task = asyncio.create_task(
+            _fetch_with_retry(
+                lambda: _fetch_fred_series(client, "DTWEXBGS"),
+                name="fred",
+                columns=["dxy"],
+            )
+        )
+        ust10_task = asyncio.create_task(
+            _fetch_with_retry(
+                lambda: _fetch_fred_series(client, "DGS10"),
+                name="fred",
+                columns=["ust10"],
+            )
+        )
         gold_task = asyncio.create_task(_fetch_gold())
-        sp500_task = asyncio.create_task(_fetch_yahoo_series("^GSPC", "spx_index"))
+        sp500_task = asyncio.create_task(
+            _fetch_with_retry(
+                lambda: _fetch_fred_series(client, "SP500"),
+                name="fred",
+                columns=["spx_index"],
+            )
+        )
 
         cg_data = await cg_task
         cm_data = await cm_task
+        fed_liq = await fed_liq_task
+        ecb_liq = await ecb_liq_task
         dxy = await dxy_task
         ust10 = await ust10_task
         gold = await gold_task
         sp500 = await sp500_task
-    frames = [cg_data, cm_data, dxy, ust10, gold, sp500]
+    frames = [cg_data, cm_data, fed_liq, ecb_liq, dxy, ust10, gold, sp500]
     df = pd.concat(frames, axis=1)
     if "volume" in df.columns:
         df = df.drop(columns=["volume"])
