@@ -509,8 +509,7 @@ Finance
 
 Equity
 
-Index (S&P
-
+via Yahoo Finance (GLD ETF ticker).
 500 or
 
 Nasdaq)
