@@ -1,4 +1,5 @@
 import os
+import argparse
 import pandas as pd
 import yfinance as yf
 from pycoingecko import CoinGeckoAPI
@@ -50,7 +51,6 @@ def get_yfinance_data(ticker, start_date, end_date, column_name):
             df.rename(columns={'Close': column_name}, inplace=True)
             # Validate data to ensure it's within a reasonable range
             if 'price' in column_name or 'usd' in column_name:
-                # Assuming prices should not be zero or negative
                 df = df[df[column_name] > 0]
             return df
         return pd.DataFrame()
@@ -58,13 +58,15 @@ def get_yfinance_data(ticker, start_date, end_date, column_name):
         print(f"An error occurred with Yahoo Finance for {ticker}: {e}")
         return pd.DataFrame()
 
-def main():
+def main(years=1):
     """
     Main function to ingest data and save it to a CSV file.
+    
+    :param years: Number of years of historical data to fetch.
     """
     # Define the date range
     end_date = datetime.now()
-    start_date = end_date - timedelta(days=365)
+    start_date = end_date - timedelta(days=365 * years)
 
     # Fetch Bitcoin data from CoinGecko
     btc_df = get_btc_price_coingecko(start_date, end_date)
@@ -87,32 +89,26 @@ def main():
     ust10_df = get_yfinance_data('^TNX', start_date, end_date, 'ust10')
 
     # --- Data Merging ---
-    # Start with the Bitcoin data as the base
     merged_df = btc_df
-
-    # Merge other dataframes one by one
     for df in [gold_df, spx_df, dxy_df, ust10_df]:
         if not df.empty:
-            # Use an outer join to keep all dates and identify missing data
             merged_df = merged_df.merge(df, how='left', left_index=True, right_index=True)
 
-    # Forward-fill missing values to handle non-trading days
     merged_df.fillna(method='ffill', inplace=True)
-    
-    # Drop any remaining NaN values at the beginning of the series
     merged_df.dropna(inplace=True)
 
     # --- Save to CSV ---
-    # Create the output directory if it doesn't exist
     output_dir = 'data'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         
-    # Save the dataframe to a CSV file
-    file_path = os.path.join(output_dir, 'btc_and_macro_data.csv')
+    file_path = os.path.join(output_dir, f'btc_and_macro_data_{years}y.csv')
     merged_df.to_csv(file_path)
     
     print(f"Data ingestion complete. File saved to {file_path}")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Ingest historical market data.')
+    parser.add_argument('--years', type=int, default=1, help='Number of years of historical data to fetch.')
+    args = parser.parse_args()
+    main(years=args.years)
