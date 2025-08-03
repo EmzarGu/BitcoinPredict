@@ -189,12 +189,12 @@ async def _fetch_coinmetrics(
 
 
 async def _fetch_yahoo_gold() -> pd.DataFrame:
-    """Fetch daily gold price from Yahoo Finance and resample to weekly."""
+    """Fetch GLD (gold ETF) prices from Yahoo Finance and resample to weekly."""
     start = pd.Timestamp.utcnow().normalize().to_pydatetime().replace(tzinfo=None)
     try:
         raw = await asyncio.to_thread(
             yf.download,
-            "GC=F",
+            "GLD",
             period="1mo",
             interval="1d",
             auto_adjust=False,
@@ -209,7 +209,7 @@ async def _fetch_yahoo_gold() -> pd.DataFrame:
         empty_index = pd.DatetimeIndex([], tz="UTC")
         return pd.DataFrame(columns=["gold_price"], index=empty_index)
 
-    # Flatten MultiIndex columns from yfinance (e.g. ('Adj Close', 'GC=F'))
+    # Flatten MultiIndex columns from yfinance (e.g. ('Adj Close', 'GLD'))
     if isinstance(raw.columns, pd.MultiIndex):
         raw.columns = raw.columns.droplevel(1)
 
@@ -322,21 +322,8 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str) -> pd.Da
     if FRED_API_KEY:
         url += f"&api_key={FRED_API_KEY}"
     column_name = FRED_COLUMN_MAP.get(series_id, series_id.lower())
-    try:
-        resp = await client.get(url, timeout=30)
-        resp.raise_for_status()
-    except httpx.HTTPStatusError:
-        logger.warning("Failed to fetch FRED series %s", series_id)
-        if series_id == "GOLDAMGBD228NLBM":
-            return await _fetch_yahoo_gold()
-        empty_index = pd.DatetimeIndex([], tz="UTC")
-        return pd.DataFrame(columns=[column_name], index=empty_index)
-    except httpx.RequestError:
-        logger.warning("Failed to fetch FRED series %s", series_id)
-        if series_id == "GOLDAMGBD228NLBM":
-            return await _fetch_yahoo_gold()
-        empty_index = pd.DatetimeIndex([], tz="UTC")
-        return pd.DataFrame(columns=[column_name], index=empty_index)
+    resp = await client.get(url, timeout=30)
+    resp.raise_for_status()
     df = pd.read_csv(io.StringIO(resp.text))
     df.columns = [c.lower() for c in df.columns]
     # Rename the first column to "date" since FRED uses "observation_date"
@@ -360,26 +347,31 @@ async def _fetch_with_retry(func, *, name: str, columns: List[str], fallback=Non
         try:
             return await func()
         except (httpx.HTTPStatusError, httpx.RequestError) as exc:
-            use_fallback = False
+            retryable = True
             if isinstance(exc, httpx.HTTPStatusError):
                 status = exc.response.status_code
-                retryable = status >= 500 or (
-                    name == "coingecko" and status in (401, 429)
-                )
+                retryable = status >= 500 or status == 429
                 if not retryable:
                     raise
-                use_fallback = name == "coingecko" and status in (401, 429) and fallback
-            else:  # httpx.RequestError
-                use_fallback = bool(fallback)
-            if attempt < 2:
+            if attempt < 2 and retryable:
                 await asyncio.sleep(delay)
                 delay *= 2
                 continue
-            if use_fallback:
+            if fallback is not None:
                 return await fallback()
             logger.warning("Failed to fetch %s after retries", name)
             empty_index = pd.DatetimeIndex([], tz="UTC")
             return pd.DataFrame(columns=columns, index=empty_index)
+
+
+async def _fetch_gold(client: httpx.AsyncClient) -> pd.DataFrame:
+    """Fetch gold prices with FRED primary source and Yahoo fallback."""
+    return await _fetch_with_retry(
+        lambda: _fetch_fred_series(client, "GOLDAMGBD228NLBM"),
+        name="fred_gold",
+        columns=["gold_price"],
+        fallback=_fetch_yahoo_gold,
+    )
 
 
 def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
@@ -485,12 +477,42 @@ async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
                     columns=["realised_price", "nupl"],
                 )
             )
-        fed_liq_task = asyncio.create_task(_fetch_fred_series(client, "WALCL"))
-        ecb_liq_task = asyncio.create_task(_fetch_fred_series(client, "ECBASSETS"))
-        dxy_task = asyncio.create_task(_fetch_fred_series(client, "DTWEXBGS"))
-        ust10_task = asyncio.create_task(_fetch_fred_series(client, "DGS10"))
-        gold_task = asyncio.create_task(_fetch_fred_series(client, "GOLDAMGBD228NLBM"))
-        sp500_task = asyncio.create_task(_fetch_fred_series(client, "SP500"))
+        fed_liq_task = asyncio.create_task(
+            _fetch_with_retry(
+                lambda: _fetch_fred_series(client, "WALCL"),
+                name="fred",
+                columns=["fed_liq"],
+            )
+        )
+        ecb_liq_task = asyncio.create_task(
+            _fetch_with_retry(
+                lambda: _fetch_fred_series(client, "ECBASSETS"),
+                name="fred",
+                columns=["ecb_liq"],
+            )
+        )
+        dxy_task = asyncio.create_task(
+            _fetch_with_retry(
+                lambda: _fetch_fred_series(client, "DTWEXBGS"),
+                name="fred",
+                columns=["dxy"],
+            )
+        )
+        ust10_task = asyncio.create_task(
+            _fetch_with_retry(
+                lambda: _fetch_fred_series(client, "DGS10"),
+                name="fred",
+                columns=["ust10"],
+            )
+        )
+        gold_task = asyncio.create_task(_fetch_gold(client))
+        sp500_task = asyncio.create_task(
+            _fetch_with_retry(
+                lambda: _fetch_fred_series(client, "SP500"),
+                name="fred",
+                columns=["spx_index"],
+            )
+        )
 
         cg_data = await cg_task
         cm_data = await cm_task

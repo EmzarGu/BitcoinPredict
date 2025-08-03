@@ -111,14 +111,19 @@ async def test_fetch_fred_series_with_api_key(monkeypatch):
 @pytest.mark.asyncio
 async def test_fetch_fred_series_error(monkeypatch):
     class FakeResponse:
+        status_code = 500
+
         def raise_for_status(self):
             raise httpx.HTTPStatusError("error", request=None, response=self)
 
     class FakeClient:
         async def get(self, url, timeout=30):
             return FakeResponse()
-
-    df = await ingest._fetch_fred_series(FakeClient(), "WALCL")
+    df = await ingest._fetch_with_retry(
+        lambda: ingest._fetch_fred_series(FakeClient(), "WALCL"),
+        name="fred",
+        columns=["fed_liq"],
+    )
     assert list(df.columns) == ["fed_liq"]
     assert df.empty
     assert isinstance(df.index, pd.DatetimeIndex)
@@ -154,8 +159,11 @@ async def test_fetch_fred_series_request_error(monkeypatch):
     class FakeClient:
         async def get(self, url, timeout=30):
             raise httpx.RequestError("boom", request=httpx.Request("GET", url))
-
-    df = await ingest._fetch_fred_series(FakeClient(), "WALCL")
+    df = await ingest._fetch_with_retry(
+        lambda: ingest._fetch_fred_series(FakeClient(), "WALCL"),
+        name="fred",
+        columns=["fed_liq"],
+    )
     assert list(df.columns) == ["fed_liq"]
     assert df.empty
     assert isinstance(df.index, pd.DatetimeIndex)
@@ -228,7 +236,7 @@ async def test_fetch_yahoo_gold_prices_missing(monkeypatch):
     fixed = pd.Timestamp("2024-01-01", tz="UTC")
 
     def fake_download(*args, **kwargs):
-        raise ingest.YFPricesMissingError("GC=F", {})
+        raise ingest.YFPricesMissingError("GLD", {})
 
     monkeypatch.setattr(pd.Timestamp, "utcnow", staticmethod(lambda: fixed))
     monkeypatch.setattr(ingest.yf, "download", fake_download)
@@ -259,7 +267,7 @@ async def test_fetch_yahoo_btc_prices_missing(monkeypatch):
 @pytest.mark.asyncio
 async def test_yahoo_helper_squeezes_dataframe(monkeypatch):
     idx = [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]
-    cols = pd.MultiIndex.from_product([["Adj Close"], ["GC=F", "OTHER"]])
+    cols = pd.MultiIndex.from_product([["Adj Close"], ["GLD", "OTHER"]])
     df_raw = pd.DataFrame([[4, 5], [6, 7]], index=idx, columns=cols)
     df_raw.index.name = "Date"
 
@@ -289,6 +297,8 @@ async def test_yahoo_helper_squeezes_dataframe(monkeypatch):
 @pytest.mark.asyncio
 async def test_fred_fallback_to_yahoo(monkeypatch):
     class FakeResponse:
+        status_code = 500
+
         def raise_for_status(self):
             raise httpx.HTTPStatusError("error", request=None, response=self)
 
@@ -304,7 +314,7 @@ async def test_fred_fallback_to_yahoo(monkeypatch):
 
     monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_yahoo)
 
-    df = await ingest._fetch_fred_series(FakeClient(), "GOLDAMGBD228NLBM")
+    df = await ingest._fetch_gold(FakeClient())
     assert list(df.columns) == ["gold_price"]
     assert df.iloc[0]["gold_price"] == 7
 
@@ -323,7 +333,7 @@ async def test_fred_fallback_to_yahoo_request_error(monkeypatch):
 
     monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_yahoo)
 
-    df = await ingest._fetch_fred_series(FakeClient(), "GOLDAMGBD228NLBM")
+    df = await ingest._fetch_gold(FakeClient())
     assert list(df.columns) == ["gold_price"]
     assert df.iloc[0]["gold_price"] == 7
 
@@ -343,7 +353,7 @@ async def test_fetch_fred_series_request_error_gold_fallback(monkeypatch):
 
     monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_yahoo)
 
-    df = await ingest._fetch_fred_series(FakeClient(), "GOLDAMGBD228NLBM")
+    df = await ingest._fetch_gold(FakeClient())
     assert list(df.columns) == ["gold_price"]
     assert df.iloc[0]["gold_price"] == 5
 
