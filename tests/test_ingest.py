@@ -46,9 +46,13 @@ async def test_schema_columns(monkeypatch):
         df = pd.DataFrame({col: [1]}, index=[week_start])
         return df
 
+    async def fake_fetch_yahoo_gold():
+        return pd.DataFrame({"gold_price": [1]}, index=[week_start])
+
     monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
     monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
     monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_fetch_yahoo_gold)
 
     df = await ingest.ingest_weekly()
     assert list(df.columns) == ingest.SCHEMA_COLUMNS
@@ -148,12 +152,15 @@ async def test_ingest_weekly_yields_prices(monkeypatch):
 
     async def fake_fetch_fred_series(client, series_id):
         col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
-        value = 5 if series_id == "GOLDAMGBD228NLBM" else 1
-        return pd.DataFrame({col: [value]}, index=[week_start])
+        return pd.DataFrame({col: [1]}, index=[week_start])
+
+    async def fake_fetch_yahoo_gold():
+        return pd.DataFrame({"gold_price": [5]}, index=[week_start])
 
     monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
     monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
     monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_fetch_yahoo_gold)
 
     df = await ingest.ingest_weekly()
     assert df.loc[0, "close_usd"] == 10
@@ -177,31 +184,6 @@ async def test_fetch_fred_series_request_error(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fred_404_triggers_fallback(monkeypatch):
-    class FakeResponse:
-        status_code = 404
-
-        def raise_for_status(self):
-            raise httpx.HTTPStatusError("not found", request=None, response=self)
-
-    class FakeClient:
-        async def get(self, url, params=None, timeout=30):
-            return FakeResponse()
-
-    async def fake_fallback():
-        week_start = pd.Timestamp(datetime.now(tz=timezone.utc))
-        return pd.DataFrame({"gold_price": [7]}, index=[week_start])
-
-    df = await ingest._fetch_with_retry(
-        lambda: ingest._fetch_fred_series(FakeClient(), "GOLDAMGBD228NLBM"),
-        name="fred_gold",
-        columns=["gold_price"],
-        fallback=fake_fallback,
-    )
-    assert df.iloc[0]["gold_price"] == 7
-
-
-@pytest.mark.asyncio
 async def test_ingest_weekly_fred_failure(monkeypatch):
     week_start = pd.Timestamp(datetime.now(tz=timezone.utc))
 
@@ -216,9 +198,13 @@ async def test_ingest_weekly_fred_failure(monkeypatch):
         col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
         return pd.DataFrame(columns=[col], index=pd.DatetimeIndex([], tz="UTC"))
 
+    async def fake_fetch_yahoo_gold():
+        return pd.DataFrame({"gold_price": [1]}, index=[week_start])
+
     monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
     monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
     monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_fetch_yahoo_gold)
 
     with pd.option_context("future.no_silent_downcasting", True):
         with warnings.catch_warnings(record=True) as w:
@@ -326,67 +312,17 @@ async def test_yahoo_helper_squeezes_dataframe(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fred_fallback_to_yahoo(monkeypatch):
-    class FakeResponse:
-        status_code = 500
-
-        def raise_for_status(self):
-            raise httpx.HTTPStatusError("error", request=None, response=self)
-
-    class FakeClient:
-        async def get(self, url, params=None, timeout=30):
-            return FakeResponse()
-
-    async def fake_yahoo():
-        df = pd.DataFrame(
-            {"gold_price": [7]}, index=[pd.Timestamp("2024-01-01", tz="UTC")]
-        )
-        return df
-
-    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_yahoo)
-
-    df = await ingest._fetch_gold(FakeClient())
-    assert list(df.columns) == ["gold_price"]
-    assert df.iloc[0]["gold_price"] == 7
-
-
-@pytest.mark.asyncio
-async def test_fred_fallback_to_yahoo_request_error(monkeypatch):
-    class FakeClient:
-        async def get(self, url, params=None, timeout=30):
-            raise httpx.RequestError("boom", request=httpx.Request("GET", url))
-
-    async def fake_yahoo():
-        df = pd.DataFrame(
-            {"gold_price": [7]}, index=[pd.Timestamp("2024-01-01", tz="UTC")]
-        )
-        return df
-
-    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_yahoo)
-
-    df = await ingest._fetch_gold(FakeClient())
-    assert list(df.columns) == ["gold_price"]
-    assert df.iloc[0]["gold_price"] == 7
-
-
-@pytest.mark.asyncio
-async def test_fetch_fred_series_request_error_gold_fallback(monkeypatch):
-    """RequestError should trigger Yahoo fallback for the gold series."""
-
-    class FakeClient:
-        async def get(self, url, params=None, timeout=30):
-            raise httpx.RequestError("boom", request=httpx.Request("GET", url))
-
+async def test_fetch_gold_uses_yahoo(monkeypatch):
     async def fake_yahoo():
         return pd.DataFrame(
-            {"gold_price": [5]}, index=[pd.Timestamp("2024-01-01", tz="UTC")]
+            {"gold_price": [7]}, index=[pd.Timestamp("2024-01-01", tz="UTC")]
         )
 
     monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_yahoo)
 
-    df = await ingest._fetch_gold(FakeClient())
+    df = await ingest._fetch_gold()
     assert list(df.columns) == ["gold_price"]
-    assert df.iloc[0]["gold_price"] == 5
+    assert df.iloc[0]["gold_price"] == 7
 
 
 @pytest.mark.asyncio
@@ -422,12 +358,18 @@ async def test_retry_on_429(monkeypatch):
         col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
         return pd.DataFrame({col: [1]}, index=[week_start])
 
+    async def fake_yahoo_gold(*args, **kwargs):
+        return pd.DataFrame({"gold_price": [1]}, index=[week_start])
+
     yahoo_calls = 0
 
     async def fake_yahoo(*args, **kwargs):
         nonlocal yahoo_calls
         yahoo_calls += 1
         return pd.DataFrame({"close_usd": [7], "volume": [pd.NA]}, index=[week_start])
+
+    async def fake_yahoo_gold(*args, **kwargs):
+        return pd.DataFrame({"gold_price": [1]}, index=[week_start])
 
     async def fake_sleep(_):
         pass
@@ -437,6 +379,7 @@ async def test_retry_on_429(monkeypatch):
     monkeypatch.setattr(ingest, "_fetch_yahoo_btc", fake_yahoo)
     monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_coinmetrics)
     monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fred)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_yahoo_gold)
     monkeypatch.setattr(ingest.asyncio, "sleep", fake_sleep)
 
     await ingest.ingest_weekly(week_anchor=week_start)
@@ -484,6 +427,9 @@ async def test_coingecko_fallback_to_yahoo(monkeypatch):
         col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
         return pd.DataFrame({col: [1]}, index=[week_start])
 
+    async def fake_yahoo_gold(*args, **kwargs):
+        return pd.DataFrame({"gold_price": [1]}, index=[week_start])
+
     async def fake_sleep(_):
         pass
 
@@ -492,6 +438,7 @@ async def test_coingecko_fallback_to_yahoo(monkeypatch):
     monkeypatch.setattr(ingest, "_fetch_yahoo_btc", fake_yahoo_btc)
     monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_coinmetrics)
     monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fred)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_yahoo_gold)
     monkeypatch.setattr(ingest.asyncio, "sleep", fake_sleep)
 
     df = await ingest.ingest_weekly(week_anchor=week_start)
@@ -518,9 +465,13 @@ async def test_ingest_weekly_db_upsert(monkeypatch):
         df = pd.DataFrame({col: [1]}, index=[week_start])
         return df
 
+    async def fake_fetch_yahoo_gold():
+        return pd.DataFrame({"gold_price": [1]}, index=[week_start])
+
     monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
     monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
     monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_fetch_yahoo_gold)
 
     captured = {}
 
@@ -588,6 +539,9 @@ async def test_table_setup_called(monkeypatch):
         col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
         return pd.DataFrame({col: [1]}, index=[pd.Timestamp.utcnow()])
 
+    async def fake_fetch_yahoo_gold():
+        return pd.DataFrame({"gold_price": [1]}, index=[pd.Timestamp.utcnow()])
+
     class FakeCursor:
         def __enter__(self):
             return self
@@ -623,6 +577,7 @@ async def test_table_setup_called(monkeypatch):
     monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
     monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
     monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_fetch_yahoo_gold)
     monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
     monkeypatch.setattr(ingest.psycopg2, "connect", fake_connect)
     monkeypatch.setattr(ingest.psycopg2.extras, "execute_values", fake_execute_values)
@@ -771,9 +726,13 @@ async def test_ingest_weekly_historical_no_data(monkeypatch, caplog):
         col = ingest.FRED_COLUMN_MAP.get(series_id, series_id.lower())
         return pd.DataFrame({col: [pd.NA]}, index=[week_start])
 
+    async def fake_fetch_yahoo_gold(*args, **kwargs):
+        return pd.DataFrame({"gold_price": [pd.NA]}, index=[week_start])
+
     monkeypatch.setattr(ingest, "_fetch_coingecko", fake_fetch_coingecko)
     monkeypatch.setattr(ingest, "_fetch_coinmetrics", fake_fetch_coinmetrics)
     monkeypatch.setattr(ingest, "_fetch_fred_series", fake_fetch_fred_series)
+    monkeypatch.setattr(ingest, "_fetch_yahoo_gold", fake_fetch_yahoo_gold)
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://example/db")
     called = []

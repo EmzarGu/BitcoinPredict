@@ -42,7 +42,6 @@ FRED_COLUMN_MAP = {
     "ECBASSETS": "ecb_liq",
     "DTWEXBGS": "dxy",
     "DGS10": "ust10",
-    "GOLDAMGBD228NLBM": "gold_price",
     "SP500": "spx_index",
 }
 
@@ -369,14 +368,9 @@ async def _fetch_with_retry(func, *, name: str, columns: List[str], fallback=Non
             return pd.DataFrame(columns=columns, index=empty_index)
 
 
-async def _fetch_gold(client: httpx.AsyncClient) -> pd.DataFrame:
-    """Fetch gold prices with FRED primary source and Yahoo fallback."""
-    return await _fetch_with_retry(
-        lambda: _fetch_fred_series(client, "GOLDAMGBD228NLBM"),
-        name="fred_gold",
-        columns=["gold_price"],
-        fallback=_fetch_yahoo_gold,
-    )
+async def _fetch_gold() -> pd.DataFrame:
+    """Fetch gold prices from Yahoo Finance using the GLD ticker."""
+    return await _fetch_yahoo_gold()
 
 
 def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
@@ -510,7 +504,7 @@ async def ingest_weekly(week_anchor: datetime | None = None) -> pd.DataFrame:
                 columns=["ust10"],
             )
         )
-        gold_task = asyncio.create_task(_fetch_gold(client))
+        gold_task = asyncio.create_task(_fetch_gold())
         sp500_task = asyncio.create_task(
             _fetch_with_retry(
                 lambda: _fetch_fred_series(client, "SP500"),

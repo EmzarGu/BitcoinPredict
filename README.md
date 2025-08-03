@@ -46,7 +46,7 @@ export FRED_API_KEY="your_fred_key"
 
 When a requested series cannot be retrieved (for example if the key is missing or the API returns an error), the script continues and the affected column will be filled with `NA` values.
 
-If the gold price series (`GOLDAMGBD228NLBM`) is unavailable from FRED, the ingestor automatically falls back to downloading daily gold prices from Yahoo Finance and resamples them to weekly values.
+Gold prices are sourced directly from Yahoo Finance using the GLD ETF ticker and resampled to weekly values.
 
 ## Coingecko API access
 Some endpoints on Coingecko now require an API key. If you encounter authorization errors, set the `COINGECKO_API_KEY` environment variable:
