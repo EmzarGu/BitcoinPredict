@@ -50,7 +50,7 @@ def create_table_if_not_exists(conn):
         """)
         conn.commit()
 
-# --- All Data Fetching Functions (restored from your original script) ---
+# --- All Data Fetching Functions (with the final bug fix) ---
 async def _fetch_yahoo_data(ticker: str, start: datetime, end: datetime, col_name: str) -> pd.DataFrame:
     """Fetches data from Yahoo Finance."""
     try:
@@ -70,6 +70,8 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, col_name
         resp = await client.get(url, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text), index_col=0, parse_dates=True)
+        # FIX: This line adds the missing timezone information to prevent the TypeError
+        df.index = df.index.tz_localize('UTC')
         df.columns = [col_name]
         df[col_name] = pd.to_numeric(df[col_name], errors='coerce')
         return df
@@ -103,7 +105,7 @@ async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, en
         logger.warning(f"Failed to fetch CoinMetrics data: {e}")
     return pd.DataFrame()
 
-# --- Main Ingestion Logic (Corrected and Restored) ---
+# --- Main Ingestion Logic ---
 async def ingest_weekly(week_anchor, years=1):
     """Main async function to ingest weekly data and upsert to database."""
     end_date = week_anchor
