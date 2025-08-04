@@ -84,24 +84,23 @@ def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
 async def _fetch_yahoo_gold(start, end) -> pd.DataFrame:
     """Specific fetcher for Gold from Yahoo as a fallback."""
     try:
+        # This is the verified function from our successful notebook test
         raw = await asyncio.to_thread(yf.download, "GC=F", start=start, end=end, auto_adjust=True, progress=False)
-        if raw.empty: return pd.DataFrame()
-        
-        # *** MODIFICATION STARTS HERE ***
-        # Handle the multi-level column index returned by yfinance
+        if raw.empty:
+            logger.warning("Yahoo Finance returned no data for gold.")
+            return pd.DataFrame()
+
         price_col_tuple = ('Close', 'GC=F')
         if price_col_tuple not in raw.columns:
             logger.warning(f"Required column '{price_col_tuple}' not found in Yahoo Finance gold data.")
             return pd.DataFrame()
 
         df = raw[[price_col_tuple]].copy()
-        df.columns = ["gold_price"] # Rename the column
-        # *** MODIFICATION ENDS HERE ***
-
+        df.columns = ["gold_price"]
         df.index = pd.to_datetime(df.index, utc=True)
         return df
     except Exception as e:
-        logger.warning(f"Failed to fetch gold from Yahoo Finance: {e}")
+        logger.warning(f"An error occurred in _fetch_yahoo_gold: {e}")
     return pd.DataFrame()
 
 
@@ -113,7 +112,7 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, start, e
         resp = await client.get(url, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(io.StringIO(resp.text), index_col=0, parse_dates=True)
-        df.index = df.index.tz_localize('UTC') # FIX: Add timezone info
+        df.index = df.index.tz_localize('UTC')
         df.columns = [column_name]
         df[column_name] = pd.to_numeric(df[column_name], errors='coerce')
 
