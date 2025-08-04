@@ -113,6 +113,14 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, start, e
         df.index = df.index.tz_localize('UTC') # FIX: Add timezone info
         df.columns = [column_name]
         df[column_name] = pd.to_numeric(df[column_name], errors='coerce')
+
+        # *** MODIFICATION STARTS HERE ***
+        # If the gold series data from FRED is empty or all NaN, fall back to Yahoo
+        if series_id == "GOLDAMGBD228NLBM" and (df.empty or df[column_name].isna().all()):
+            logger.warning("FRED data for gold is unavailable. Falling back to Yahoo Finance.")
+            return await _fetch_yahoo_gold(start, end)
+        # *** MODIFICATION ENDS HERE ***
+            
         return df[[column_name]]
     except Exception as e:
         logger.warning(f"Failed to fetch FRED series {series_id}: {e}")
