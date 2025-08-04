@@ -199,6 +199,16 @@ async def _fetch_fred_series(
 
 # ─── Main ingestion ─────────────────────────────────────────────────────────
 async def ingest_weekly(week_anchor=None, years=1):
+    # Accept date or datetime; normalize to UTC datetime
+    if isinstance(week_anchor, datetime) and week_anchor.tzinfo is None:
+        week_anchor = week_anchor.replace(tzinfo=timezone.utc)
+    elif isinstance(week_anchor, datetime.date) and not isinstance(week_anchor, datetime):
+        # convert date to datetime at midnight UTC
+        week_anchor = datetime.combine(week_anchor, datetime.min.time(), tzinfo=timezone.utc)
+    now = week_anchor or datetime.now(timezone.utc)
+    end_date = now
+    start_date = end_date - timedelta(days=365 * years)
+(week_anchor=None, years=1):
     if week_anchor and week_anchor.tzinfo is None:
         week_anchor = week_anchor.replace(tzinfo=timezone.utc)
     now = week_anchor or datetime.now(timezone.utc)
