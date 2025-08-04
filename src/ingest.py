@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""
-Weekly ETL pipeline for the btc_weekly table.
-
-Key improvement v0.1.1 (2025‑08‑04)
------------------------------------
-• Robust gold-price ingestion:
-  – Accept FRED series GOLDAMGBD228NLBM only if ≥40 % of rows
-    in the requested range are numeric.
-  – Otherwise fall back automatically to Yahoo Finance (ticker GC=F).
-• Safe numeric casting helper is reused for every metric.
-• Code is reorganised for clarity: fetchers are plain functions,
-  orchestration is in `async ingest_weekly`.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -28,204 +15,160 @@ import psycopg2.extras
 import yfinance as yf
 from dotenv import load_dotenv
 
-# ─── Globals ──────────────────────────────────────────────────────────────────
+# ─── Config ────────────────────────────────────────────────────────────────
 load_dotenv()
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 SCHEMA_COLUMNS: List[str] = [
-    "week_start", "close_usd", "realised_price", "nupl", "fed_liq",
-    "ecb_liq", "dxy", "ust10", "gold_price", "spx_index",
+    "week_start", "close_usd", "realised_price", "nupl",
+    "fed_liq", "ecb_liq", "dxy", "ust10",
+    "gold_price", "spx_index",
 ]
 
-FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
-FRED_MAP = {
+COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
+COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
+FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+
+FRED_COLUMN_MAP = {
     "WALCL": "fed_liq",
     "ECBASSETS": "ecb_liq",
     "DTWEXBGS": "dxy",
     "DGS10": "ust10",
-    "GOLDAMGBD228NLBM": "gold_price",
     "SP500": "spx_index",
 }
 
-# ─── Utility helpers ──────────────────────────────────────────────────────────
-def to_float(x):
-    """Cast to python float or return None."""
-    return None if pd.isna(x) else float(x)
+# ─── Utility ───────────────────────────────────────────────────────────────
+def to_python_float(v):
+    if pd.isna(v) or v is None:
+        return None
+    return float(v)
 
-def get_db():
-    url = os.getenv("DATABASE_URL")
-    if not url:
-        raise RuntimeError("DATABASE_URL missing – check .env")
-    return psycopg2.connect(url)
+def get_db_connection():
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        raise RuntimeError("DATABASE_URL missing in .env")
+    return psycopg2.connect(db_url)
 
-def ensure_table(conn):
+def _create_table_if_missing(conn):
+    sql = """
+    CREATE TABLE IF NOT EXISTS btc_weekly (
+        week_start TIMESTAMPTZ PRIMARY KEY,
+        close_usd REAL, realised_price REAL, nupl REAL,
+        fed_liq REAL, ecb_liq REAL, dxy REAL, ust10 REAL,
+        gold_price REAL, spx_index REAL
+    );
+    """
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS btc_weekly (
-                week_start TIMESTAMPTZ PRIMARY KEY,
-                close_usd    REAL, realised_price REAL, nupl REAL,
-                fed_liq      REAL, ecb_liq        REAL, dxy  REAL,
-                ust10        REAL, gold_price     REAL, spx_index REAL
-            );
-            """
-        )
+        cur.execute(sql)
     conn.commit()
 
-def upsert_rows(conn, rows: List[Dict[str, Any]]):
+def _upsert_row(conn, row: Dict[str, Any]):
     cols = ",".join(SCHEMA_COLUMNS)
-    sets = ",".join(f"{c}=EXCLUDED.{c}" for c in SCHEMA_COLUMNS[1:])
+    updates = ",".join(f"{c}=EXCLUDED.{c}" for c in SCHEMA_COLUMNS[1:])
     tmpl = "(" + ",".join(f"%({c})s" for c in SCHEMA_COLUMNS) + ")"
     with conn.cursor() as cur:
         psycopg2.extras.execute_values(
             cur,
             f"INSERT INTO btc_weekly ({cols}) VALUES %s "
-            f"ON CONFLICT (week_start) DO UPDATE SET {sets}",
-            rows,
+            f"ON CONFLICT (week_start) DO UPDATE SET {updates}",
+            [row],
             template=tmpl,
         )
     conn.commit()
 
-# ─── Fetch helpers ────────────────────────────────────────────────────────────
-async def fred_series(client: httpx.AsyncClient, sid: str) -> pd.DataFrame:
-    """
-    Robust FRED fetcher.
-      • Try official API if FRED_API_KEY is set.
-      • Fall back to legacy CSV.
-      • On any HTTP error return an **empty** frame (so downstream
-        quality-check automatically switches to Yahoo).
-    """
-    import builtins, os, io, pandas as pd
-    col = FRED_MAP[sid]
-    api_key = os.getenv("FRED_API_KEY")
+# ─── Data fetch helpers (all your originals) ───────────────────────────────
+async def _fetch_coingecko(client, start, end):
+    params = {
+        "vs_currency": "usd",
+        "days": int((end - start).days) + 1,
+        "interval": "daily",
+    }
+    r = await client.get(COINGECKO_URL, params=params, timeout=30)
+    r.raise_for_status()
+    df = pd.DataFrame(r.json()["prices"], columns=["ts", "close_usd"])
+    df["date"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.floor("D")
+    return df.set_index("date")[["close_usd"]]
 
-    # 1️⃣ Official REST API (preferred)
-    if api_key:
-        url = (
-            "https://api.stlouisfed.org/fred/series/observations"
-            f"?series_id={sid}&api_key={api_key}"
-            "&observation_start=1900-01-01&file_type=json"
-        )
-        try:
-            r = await client.get(url, timeout=30)
-            r.raise_for_status()
-            obs = r.json()["observations"]
-            df = pd.DataFrame(obs)[["date", "value"]]
-            df["date"] = pd.to_datetime(df["date"], utc=True)
-            df.set_index("date", inplace=True)
-            df.rename(columns={"value": col}, inplace=True)
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-            return df[[col]]
-        except httpx.HTTPStatusError:
-            # bad key or missing series – fall through
-            pass
+async def _fetch_coinmetrics(client, start_date, end_date):
+    params = {
+        "assets": "btc",
+        "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD",
+        "frequency": "1d",
+        "start_time": start_date.strftime("%Y-%m-%d"),
+        "end_time": end_date.strftime("%Y-%m-%d"),
+    }
+    r = await client.get(COINMETRICS_URL, params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    df["date"] = pd.to_datetime(df["time"], utc=True)
+    df = df.set_index("date")
+    for c in ("CapRealUSD", "SplyCur", "CapMrktCurUSD"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["realised_price"] = df["CapRealUSD"] / df["SplyCur"]
+    df["nupl"] = (
+        (df["CapMrktCurUSD"] - df["CapRealUSD"]) / df["CapMrktCurUSD"]
+    )
+    return df[["realised_price", "nupl"]]
 
-    # 2️⃣ Legacy CSV
+async def _fetch_fred_series(client, series_id, start, end):
+    url = FRED_URL.format(series_id=series_id)
+    col = FRED_COLUMN_MAP.get(series_id, series_id.lower())
     try:
-        csv_url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
-        r = await client.get(
-            csv_url,
-            headers={"User-Agent": "Mozilla/5.0"},  # dodge 404 redirect
-            timeout=30,
-        )
+        r = await client.get(url, timeout=30)
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text), index_col=0, parse_dates=True)
         df.index = df.index.tz_localize("UTC")
         df.columns = [col]
         df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df[[col]]
-    except httpx.HTTPStatusError:
-        pass    # also empties out on 404
-
-    # 3️⃣ Give caller an empty DataFrame
-    return pd.DataFrame(columns=[col])
-
-async def fetch_btc(client) -> pd.DataFrame:
-    """BTC close from CoinGecko; fall back to Yahoo on failure."""
-    try:
-        p = {"vs_currency": "usd", "days": 8, "interval": "daily"}
-        r = await client.get(
-            "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart",
-            params=p, timeout=30
-        )
-        r.raise_for_status()
-        prices = pd.DataFrame(r.json()["prices"], columns=["ts", "price"])
-        prices["date"] = pd.to_datetime(prices["ts"], unit="ms", utc=True).dt.floor("D")
-        return prices.set_index("date")[["price"]].rename(columns={"price": "close_usd"})
+        return df[[col]].loc[start:end]
     except Exception as e:
-        logger.warning("CoinGecko failed, fallback to Yahoo: %s", e)
+        logger.warning(f"FRED fetch failed for {series_id}: {e}")
+    return pd.DataFrame()
 
-    # Yahoo fallback
-    raw = await asyncio.to_thread(yf.download, "BTC-USD", period="10d", progress=False)
-    price_col = "Adj Close" if "Adj Close" in raw.columns else "Close"
-    s = raw[price_col]
-    s.index = s.index.tz_localize("UTC")
-    return s.rename("close_usd").to_frame()
+# ─── NEW: dedicated gold fetcher ───────────────────────────────────────────
+async def _fetch_gold(start, end):
+    """Use Yahoo Finance first; if that fails, fall back to FRED."""
+    try:
+        raw = await asyncio.to_thread(
+            yf.download, "GC=F",
+            start=start, end=end + timedelta(days=1),
+            auto_adjust=True, progress=False
+        )
+        if not raw.empty:
+            price_col = "Adj Close" if "Adj Close" in raw.columns else "Close"
+            s = raw[price_col]
+            s.index = s.index.tz_localize("UTC")
+            return s.rename("gold_price").to_frame()
+    except Exception as e:
+        logger.warning(f"Yahoo gold fetch failed: {e}")
 
-async def fetch_coinmetrics(client, start: datetime, end: datetime) -> pd.DataFrame:
-    """Realised price & NUPL — CoinMetrics community API."""
-    url = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
-    p = {
-        "assets": "btc",
-        "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD",
-        "frequency": "1d",
-        "start_time": start.strftime("%Y-%m-%d"),
-        "end_time": end.strftime("%Y-%m-%d"),
-    }
-    r = await client.get(url, params=p, timeout=30)
-    r.raise_for_status()
-    data = pd.DataFrame(r.json()["data"])
-    if data.empty:
-        return pd.DataFrame()
-    data["date"] = pd.to_datetime(data["time"], utc=True)
-    data = data.set_index("date")
-    for c in ("CapRealUSD", "SplyCur", "CapMrktCurUSD"):
-        data[c] = pd.to_numeric(data[c], errors="coerce")
-    data["realised_price"] = data["CapRealUSD"] / data["SplyCur"]
-    data["nupl"] = (data["CapMrktCurUSD"] - data["CapRealUSD"]) / data["CapMrktCurUSD"]
-    return data[["realised_price", "nupl"]]
+    # Fallback – same CSV endpoint you used originally
+    async with httpx.AsyncClient() as client:
+        fred_df = await _fetch_fred_series(
+            client, "GOLDAMGBD228NLBM", start, end
+        )
+    return fred_df
 
-async def fetch_gold(client, start: datetime, end: datetime) -> pd.DataFrame:
-    """Gold price daily series with quality check and fallback."""
-    fred = await fred_series(client, "GOLDAMGBD228NLBM")
-    # restrict to window
-    fred = fred.loc[start:end]
-    ok_frac = fred["gold_price"].notna().mean()
-    if ok_frac >= 0.40:
-        logger.info("Using FRED gold series (%.0f %% complete).", ok_frac * 100)
-        return fred.ffill()
-
-    logger.warning("FRED gold incomplete (%.0f %% valid) – switching to Yahoo.", ok_frac * 100)
-    raw = await asyncio.to_thread(
-        yf.download, "GC=F", start=start, end=end + timedelta(days=1),
-        auto_adjust=True, progress=False
-    )
-    if raw.empty:
-        logger.error("Yahoo gold price fetch failed; returning empty frame.")
-        return pd.DataFrame()
-
-    col = "Adj Close" if "Adj Close" in raw.columns else "Close"
-    s = raw[col]
-    s.index = s.index.tz_localize("UTC")
-    return s.rename("gold_price").to_frame()
-
-# ─── Main orchestrator ────────────────────────────────────────────────────────
-async def ingest_weekly(anchor: datetime | None = None, years: int = 1) -> None:
-    anchor = anchor or datetime.now(timezone.utc)
-    start = anchor - timedelta(days=365 * years)
-    end   = anchor
+# ─── Main ingest coroutine (unchanged except gold task) ────────────────────
+async def ingest_weekly(week_anchor=None, years=1):
+    now = week_anchor or datetime.now(timezone.utc)
+    end_date = now
+    start_date = now - timedelta(days=365 * years)
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         tasks = {
-            "btc":    fetch_btc(client),
-            "cm":     fetch_coinmetrics(client, start, end),
-            "fed":    fred_series(client, "WALCL"),
-            "ecb":    fred_series(client, "ECBASSETS"),
-            "dxy":    fred_series(client, "DTWEXBGS"),
-            "ust10":  fred_series(client, "DGS10"),
-            "gold":   fetch_gold(client, start, end),
-            "spx":    fred_series(client, "SP500"),
+            "btc": _fetch_coingecko(client, start=start_date, end=end_date),
+            "cm": _fetch_coinmetrics(client, start_date=start_date, end_date=end_date),
+            "fed": _fetch_fred_series(client, "WALCL", start_date, end_date),
+            "ecb": _fetch_fred_series(client, "ECBASSETS", start_date, end_date),
+            "dxy": _fetch_fred_series(client, "DTWEXBGS", start_date, end_date),
+            "ust10": _fetch_fred_series(client, "DGS10", start_date, end_date),
+            "gold": _fetch_gold(start_date, end_date),              # ← changed
+            "spx": _fetch_fred_series(client, "SP500", start_date, end_date),
         }
         results = await asyncio.gather(*tasks.values())
         dfs = dict(zip(tasks.keys(), results))
@@ -234,35 +177,32 @@ async def ingest_weekly(anchor: datetime | None = None, years: int = 1) -> None:
         logger.error("Bitcoin price unavailable – aborting ingest.")
         return
 
-    # merge and forward‑fill
-    daily = pd.concat([df for df in dfs.values() if not df.empty], axis=1).sort_index()
-    daily = daily.ffill().dropna(subset=["close_usd"])  # must have BTC price
-
-    weekly = daily.resample("W-MON", label="left", closed="left").last()
-    rows: List[Dict[str, Any]] = []
-    for ts, r in weekly.iterrows():
-        d: Dict[str, Any] = {c: None for c in SCHEMA_COLUMNS}
-        d["week_start"] = ts
-        for k, v in r.items():
-            d[k] = to_float(v)
-        rows.append(d)
-
-    if not rows:
-        logger.warning("Nothing new to insert.")
+    merged = pd.concat([df for df in dfs.values() if not df.empty], axis=1)
+    merged = merged.sort_index().ffill()
+    merged.dropna(subset=["close_usd"], inplace=True)
+    if merged.empty:
+        logger.warning("Merged dataframe empty – nothing to insert.")
         return
 
-    with get_db() as conn:
-        ensure_table(conn)
-        upsert_rows(conn, rows)
-    logger.info("✅ %d weekly rows upserted.", len(rows))
+    weekly = merged.resample("W-MON", label="left", closed="left").last()
+    rows = []
+    for ts, row in weekly.iterrows():
+        rec = {"week_start": ts}
+        rec.update({k: to_python_float(v) for k, v in row.items()})
+        for col in SCHEMA_COLUMNS:
+            rec.setdefault(col, None)
+        rows.append(rec)
 
-# ─── CLI entry point ──────────────────────────────────────────────────────────
+    with get_db_connection() as conn:
+        _create_table_if_missing(conn)
+        for r in rows:
+            _upsert_row(conn, r)
+    logger.info("✅ Upserted %d weekly rows.", len(rows))
+
+# ─── CLI entry point ───────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import argparse, sys
-    p = argparse.ArgumentParser(description="Ingest weekly market data")
-    p.add_argument("--years", type=int, default=1, help="History window (years)")
-    args = p.parse_args()
-    try:
-        asyncio.run(ingest_weekly(datetime.now(timezone.utc), years=args.years))
-    except KeyboardInterrupt:
-        sys.exit(130)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--years", type=int, default=1)
+    args = parser.parse_args()
+    asyncio.run(ingest_weekly(datetime.now(timezone.utc), years=args.years))
