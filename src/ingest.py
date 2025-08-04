@@ -4,6 +4,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
+import argparse # Make sure argparse is imported
 
 import httpx
 import pandas as pd
@@ -272,10 +273,22 @@ async def ingest_weekly(week_anchor=None, years=1):
         print(f"❌ An error occurred during the database operation: {e}")
 
 
-# This block allows running the script from the command line
+# --- This block allows running the script from the command line ---
 if __name__ == "__main__":
-    import argparse
+    # *** THIS IS THE MODIFIED PART ***
     parser = argparse.ArgumentParser(description='Ingest historical market data.')
     parser.add_argument('--years', type=int, default=1, help='Number of years of historical data to fetch.')
+    parser.add_argument('--date', type=str, default=None, help='Anchor date for the ingestion in YYYY-MM-DD format. Defaults to today.')
     args = parser.parse_args()
-    asyncio.run(ingest_weekly(datetime.now(timezone.utc), years=args.years))
+
+    anchor_date = None
+    if args.date:
+        try:
+            # Parse the date string and make it timezone-aware (UTC)
+            anchor_date = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            print("❌ Error: Date format must be YYYY-MM-DD.")
+            sys.exit(1)
+    
+    # If no date is provided, anchor_date remains None and ingest_weekly will use the current time
+    asyncio.run(ingest_weekly(week_anchor=anchor_date, years=args.years))
