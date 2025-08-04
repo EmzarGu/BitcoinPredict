@@ -2,6 +2,7 @@ import asyncio
 import io
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 import argparse
@@ -15,9 +16,7 @@ import yfinance as yf
 from yfinance.exceptions import YFPricesMissingError
 from dotenv import load_dotenv
 
-# This loads your DATABASE_URL and any API keys from your .env file
 load_dotenv()
-
 logger = logging.getLogger(__name__)
 
 SCHEMA_COLUMNS: List[str] = [
@@ -30,29 +29,23 @@ COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metr
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
 FRED_API_KEY = os.getenv("FRED_API_KEY")
 
-# This mapping is from your original script
 FRED_COLUMN_MAP = {
     "WALCL": "fed_liq", "ECBASSETS": "ecb_liq", "DTWEXBGS": "dxy",
     "DGS10": "ust10", "GOLDAMGBD228NLBM": "gold_price", "SP500": "spx_index",
 }
 
-# --- Helper Function to Fix the Database Data Type Bug ---
 def to_python_float(value):
-    """Converts a pandas/numpy number to a standard Python float, or None."""
     if pd.isna(value) or value is None:
         return None
     return float(value)
 
-# --- Database Connection and Setup (from your original script) ---
 def get_db_connection():
-    """Establishes a connection using the DATABASE_URL from the .env file."""
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         raise ValueError("DATABASE_URL not found. Please check your .env file.")
     return psycopg2.connect(database_url)
 
 def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
-    """Create the ``btc_weekly`` table if it doesn't exist."""
     create_sql = """
     CREATE TABLE IF NOT EXISTS btc_weekly (
         week_start TIMESTAMPTZ PRIMARY KEY,
@@ -65,7 +58,6 @@ def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
     conn.commit()
 
 def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
-    """Ensure table exists and upsert a single row."""
     _create_table_if_missing(conn)
     columns = ",".join(SCHEMA_COLUMNS)
     update = ",".join([f"{c} = EXCLUDED.{c}" for c in SCHEMA_COLUMNS[1:]])
@@ -79,11 +71,7 @@ def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
         )
     conn.commit()
 
-
-# --- All Data Fetching Functions (Restored to your original, robust logic) ---
-
 async def _fetch_yahoo_gold(start, end) -> pd.DataFrame:
-    """Specific fetcher for Gold from Yahoo as a fallback."""
     try:
         raw = await asyncio.to_thread(yf.download, "GC=F", start=start, end=end, auto_adjust=True, progress=False)
         if raw.empty:
@@ -103,9 +91,7 @@ async def _fetch_yahoo_gold(start, end) -> pd.DataFrame:
         logger.warning(f"An error occurred in _fetch_yahoo_gold: {e}")
     return pd.DataFrame()
 
-
 async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, start, end) -> pd.DataFrame:
-    """Fetches a single data series from FRED, with fallback for Gold."""
     url = FRED_URL.format(series_id=series_id)
     column_name = FRED_COLUMN_MAP.get(series_id, series_id.lower())
     try:
@@ -128,9 +114,7 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, start, e
             return await _fetch_yahoo_gold(start, end)
     return pd.DataFrame()
 
-
 async def _fetch_yahoo_btc(start: datetime | None, end: datetime | None) -> pd.DataFrame:
-    """Fetches BTC price from Yahoo, restored from your original script."""
     try:
         kwargs = {"interval": "1d", "auto_adjust": False}
         if start and end:
@@ -160,9 +144,7 @@ async def _fetch_yahoo_btc(start: datetime | None, end: datetime | None) -> pd.D
         logger.warning(f"Failed to fetch BTC from Yahoo Finance: {e}")
     return pd.DataFrame()
 
-
 async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame:
-    """Fetches Bitcoin prices from CoinGecko, with Yahoo Finance as fallback."""
     try:
         if start and end:
             return await _fetch_yahoo_btc(start, end)
@@ -181,12 +163,8 @@ async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = N
         logger.warning(f"CoinGecko failed ({e}), falling back to Yahoo Finance.")
         return await _fetch_yahoo_btc(start, end)
 
-
 async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
-    """
-    Fetches on-chain metrics from CoinMetrics with a retry mechanism.
-    """
-    # *** THIS IS THE NEW, MORE RESILIENT FUNCTION ***
+    print("--- DEBUG: Attempting to fetch from CoinMetrics ---")
     params = {
         "assets": "btc",
         "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD",
@@ -203,14 +181,15 @@ async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, en
             data = resp.json().get("data", [])
 
             if not data:
-                logger.warning(f"CoinMetrics returned no data on attempt {attempt + 1}.")
+                print(f"--- DEBUG: CoinMetrics returned no data on attempt {attempt + 1} ---")
                 if attempt < max_retries - 1:
                     await asyncio.sleep(5)
                     continue
                 else:
-                    logger.error("All attempts to fetch from CoinMetrics failed, no data received.")
+                    print("--- DEBUG: All CoinMetrics attempts failed, returning empty DataFrame. ---")
                     return pd.DataFrame()
 
+            print("--- DEBUG: CoinMetrics data received successfully. ---")
             df = pd.DataFrame(data)
             df['date'] = pd.to_datetime(df['time'], utc=True)
             df = df.set_index('date')
@@ -224,17 +203,14 @@ async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, en
             return df[["realised_price", "nupl"]]
 
         except Exception as e:
-            logger.warning(f"Failed to fetch CoinMetrics data on attempt {attempt + 1}: {e}")
+            print(f"--- DEBUG: Error fetching CoinMetrics on attempt {attempt + 1}: {e} ---")
             if attempt < max_retries - 1:
                 await asyncio.sleep(5)
             else:
-                logger.error("All retry attempts for CoinMetrics failed.")
+                print("--- DEBUG: All retry attempts for CoinMetrics failed. ---")
                 return pd.DataFrame()
 
-
-# --- Main Ingestion Logic (Based on your original) ---
 async def ingest_weekly(week_anchor=None, years=1):
-    """Main async function to ingest weekly data and upsert to database."""
     now = week_anchor or datetime.now(timezone.utc)
     week_start_date = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     end_date = now
@@ -259,12 +235,42 @@ async def ingest_weekly(week_anchor=None, years=1):
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
+    print("\n--- DEBUG: Inspecting dataframes before merge ---")
+    if not dataframes["gold"].empty:
+        print("Gold dataframe is NOT empty. Last 5 rows:")
+        print(dataframes["gold"].tail())
+    else:
+        print("Gold dataframe IS EMPTY.")
+    if not dataframes["cm"].empty:
+        print("CoinMetrics dataframe is NOT empty. Last 5 rows:")
+        print(dataframes["cm"].tail())
+    else:
+        print("CoinMetrics dataframe IS EMPTY.")
+
     merged_df = pd.concat([df for df in dataframes.values() if not df.empty], axis=1)
     if "volume" in merged_df.columns:
         merged_df = merged_df.drop(columns=["volume"])
     
+    print("\n--- DEBUG: After pd.concat, before ffill ---")
+    print("Last 5 rows of merged_df:")
+    print(merged_df.tail())
+    if 'realised_price' in merged_df.columns:
+        print("Realised prices in last 5 rows:")
+        print(merged_df['realised_price'].tail())
+    else:
+        print("Realised price column MISSING after concat.")
+    
     merged_df = merged_df.sort_index().ffill()
     
+    print("\n--- DEBUG: After ffill ---")
+    print("Last 5 rows of merged_df:")
+    print(merged_df.tail())
+    if 'realised_price' in merged_df.columns:
+        print("Realised prices in last 5 rows:")
+        print(merged_df['realised_price'].tail())
+    else:
+        print("Realised price column MISSING after ffill.")
+
     merged_df.dropna(subset=['close_usd'], inplace=True)
 
     if merged_df.empty:
@@ -301,8 +307,6 @@ async def ingest_weekly(week_anchor=None, years=1):
     except Exception as e:
         print(f"❌ An error occurred during the database operation: {e}")
 
-
-# --- This block allows running the script from the command line ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Ingest historical market data.')
     parser.add_argument('--years', type=int, default=1, help='Number of years of historical data to fetch.')
@@ -312,7 +316,6 @@ if __name__ == "__main__":
     anchor_date = None
     if args.date:
         try:
-            # Parse the date string and make it timezone-aware (UTC)
             anchor_date = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
         except ValueError:
             print("❌ Error: Date format must be YYYY-MM-DD.")
