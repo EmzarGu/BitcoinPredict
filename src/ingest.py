@@ -177,32 +177,35 @@ async def _fetch_fred_series(
 
 async def _fetch_yahoo_gold(start: datetime, end: datetime) -> pd.DataFrame:
     """
-    Always fetch gold via Yahoo Finance with multiple ticker fallbacks,
-    and return a UTC-indexed DataFrame with a single column 'gold_price'.
+    Fetch gold price via Yahoo Finance (ticker GC=F) with UTC index.
     """
-    tickers = ['GC=F', 'XAUUSD=X', 'GLD']
-    for ticker in tickers:
-        try:
-            raw = await asyncio.to_thread(
-                yf.download,
-                ticker,
-                start=start.strftime('%Y-%m-%d'),
-                end=end.strftime('%Y-%m-%d'),
-                auto_adjust=True,
-                progress=False,
-            )
-            if raw.empty:
-                continue
-            if isinstance(raw.columns, pd.MultiIndex):
-                raw.columns = raw.columns.droplevel(0)
-            price_col = 'Adj Close' if 'Adj Close' in raw.columns else 'Close'
-            if price_col not in raw.columns:
-                continue
-            df = raw[[price_col]].copy()
-            df.columns = ['gold_price']
-            df.index = pd.to_datetime(df.index).tz_localize('UTC')
-            logger.info(f"Fetched gold from {ticker}")
-            return df
+    try:
+        # Use end + 1 day to include the end date
+        df = await asyncio.to_thread(
+            yf.download,
+            "GC=F",
+            start=start.strftime("%Y-%m-%d"),
+            end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
+            auto_adjust=True,
+            progress=False,
+        )
+        if df.empty:
+            logger.warning("Yahoo gold fetch returned empty for GC=F")
+            return pd.DataFrame()
+        # Drop any extra levels and pick adjusted close
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.droplevel(0)
+        price_col = "Adj Close" if "Adj Close" in df.columns else "Close"
+        if price_col not in df.columns:
+            logger.warning("Yahoo gold data has no '%s' column", price_col)
+            return pd.DataFrame()
+        series = df[price_col].copy()
+        series.name = "gold_price"
+        series.index = pd.to_datetime(series.index).tz_localize("UTC")
+        return series.to_frame()
+    except Exception as e:
+        logger.warning(f"Yahoo gold fetch failed for GC=F: {e}")
+    return pd.DataFrame()
         except Exception as e:
             logger.warning(f"Yahoo gold fetch failed for {ticker}: {e}")
     return pd.DataFrame()
