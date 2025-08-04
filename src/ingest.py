@@ -208,12 +208,6 @@ async def ingest_weekly(week_anchor=None, years=1):
     now = week_anchor or datetime.now(timezone.utc)
     end_date = now
     start_date = end_date - timedelta(days=365 * years)
-(week_anchor=None, years=1):
-    if week_anchor and week_anchor.tzinfo is None:
-        week_anchor = week_anchor.replace(tzinfo=timezone.utc)
-    now = week_anchor or datetime.now(timezone.utc)
-    end_date = now
-    start_date = end_date - timedelta(days=365 * years)
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         tasks = {
