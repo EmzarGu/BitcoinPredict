@@ -43,10 +43,8 @@ FRED_COLUMN_MAP = {
 }
 
 # ─── Utilities ──────────────────────────────────────────────────────────────
-import pandas as _pd  # ensure pandas is in namespace
-
 def to_python_float(value: Any) -> float | None:
-    if _pd.isna(value) or value is None:
+    if pd.isna(value) or value is None:
         return None
     return float(value)
 
@@ -90,9 +88,6 @@ def _upsert_row(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> No
 async def _fetch_coingecko(
     client: httpx.AsyncClient, start: datetime, end: datetime
 ) -> pd.DataFrame:
-    """
-    Fetch BTC price from CoinGecko; fall back to Yahoo Finance on error or unauthorized.
-    """
     params = {"vs_currency": "usd", "days": (end - start).days + 1, "interval": "daily"}
     try:
         r = await client.get(COINGECKO_URL, params=params, timeout=30)
@@ -105,14 +100,13 @@ async def _fetch_coingecko(
         logger.warning(f"CoinGecko fetch failed ({e}); falling back to Yahoo Finance.")
     except Exception as e:
         logger.warning(f"CoinGecko error ({e}); falling back to Yahoo Finance.")
-
     # Fallback to Yahoo Finance
     try:
         raw = await asyncio.to_thread(
             yf.download,
             "BTC-USD",
             start=start.strftime('%Y-%m-%d'),
-            end=end.strftime('%Y-%m-%d'),
+            end=(end + timedelta(days=1)).strftime('%Y-%m-%d'),
             interval="1d",
             auto_adjust=False,
             progress=False,
@@ -125,8 +119,7 @@ async def _fetch_coingecko(
         series = raw[price_col].copy()
         series.name = 'close_usd'
         series.index = pd.to_datetime(series.index, utc=True)
-        df = series.to_frame()
-        return df
+        return series.to_frame()
     except Exception as e:
         logger.warning(f"Yahoo BTC fetch failed: {e}")
     return pd.DataFrame()
@@ -177,10 +170,10 @@ async def _fetch_fred_series(
 
 async def _fetch_yahoo_gold(start: datetime, end: datetime) -> pd.DataFrame:
     """
-    Fetch gold price via Yahoo Finance (ticker GC=F) with UTC index.
+    Fetch gold price via Yahoo Finance (ticker GC=F), returning a UTC-indexed
+    DataFrame with column 'gold_price'.
     """
     try:
-        # Use end + 1 day to include the end date
         df = await asyncio.to_thread(
             yf.download,
             "GC=F",
@@ -192,7 +185,6 @@ async def _fetch_yahoo_gold(start: datetime, end: datetime) -> pd.DataFrame:
         if df.empty:
             logger.warning("Yahoo gold fetch returned empty for GC=F")
             return pd.DataFrame()
-        # Drop any extra levels and pick adjusted close
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(0)
         price_col = "Adj Close" if "Adj Close" in df.columns else "Close"
@@ -206,18 +198,12 @@ async def _fetch_yahoo_gold(start: datetime, end: datetime) -> pd.DataFrame:
     except Exception as e:
         logger.warning(f"Yahoo gold fetch failed for GC=F: {e}")
     return pd.DataFrame()
-        except Exception as e:
-            logger.warning(f"Yahoo gold fetch failed for {ticker}: {e}")
-    return pd.DataFrame()
 
 # ─── Main ingestion ─────────────────────────────────────────────────────────
-# (No changes below; snippet testing is separate)
-
+# (No changes here; orchestration unchanged)
 async def ingest_weekly(week_anchor=None, years=1):
-    # Treat naive anchor as UTC
     if week_anchor and week_anchor.tzinfo is None:
         week_anchor = week_anchor.replace(tzinfo=timezone.utc)
-
     now = week_anchor or datetime.now(timezone.utc)
     end_date = now
     start_date = end_date - timedelta(days=365 * years)
@@ -241,7 +227,6 @@ async def ingest_weekly(week_anchor=None, years=1):
                 dfs[key] = pd.DataFrame()
             else:
                 dfs[key] = result
-        dfs = dict(zip(tasks.keys(), results))
 
     if dfs['btc'].empty:
         logger.error("Bitcoin price unavailable – aborting ingest.")
@@ -273,6 +258,6 @@ async def ingest_weekly(week_anchor=None, years=1):
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('--years', type=int, default=1)
+    parser.add_argument("--years", type=int, default=1)
     args = parser.parse_args()
     asyncio.run(ingest_weekly(datetime.now(timezone.utc), years=args.years))
