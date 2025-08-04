@@ -4,7 +4,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
-import argparse # Make sure argparse is imported
+import argparse
 
 import httpx
 import pandas as pd
@@ -183,24 +183,53 @@ async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = N
 
 
 async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
-    """Fetches on-chain metrics from CoinMetrics."""
-    params = {"assets": "btc", "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD", "frequency": "1d", "start_time": start_date.strftime("%Y-%m-%d"), "end_time": end_date.strftime("%Y-%m-%d")}
-    try:
-        resp = await client.get(COINMETRICS_URL, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json().get("data", [])
-        if not data: return pd.DataFrame()
-        df = pd.DataFrame(data)
-        df['date'] = pd.to_datetime(df['time'], utc=True)
-        df = df.set_index('date')
-        for col in ["CapRealUSD", "SplyCur", "CapMrktCurUSD"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["realised_price"] = df["CapRealUSD"] / df["SplyCur"]
-        df["nupl"] = (df["CapMrktCurUSD"] - df["CapRealUSD"]) / df["CapMrktCurUSD"]
-        return df[["realised_price", "nupl"]]
-    except Exception as e:
-        logger.warning(f"Failed to fetch CoinMetrics data: {e}")
-    return pd.DataFrame()
+    """
+    Fetches on-chain metrics from CoinMetrics with a retry mechanism.
+    """
+    # *** THIS IS THE NEW, MORE RESILIENT FUNCTION ***
+    params = {
+        "assets": "btc",
+        "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD",
+        "frequency": "1d",
+        "start_time": start_date.strftime("%Y-%m-%d"),
+        "end_time": end_date.strftime("%Y-%m-%d")
+    }
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            resp = await client.get(COINMETRICS_URL, params=params, timeout=30)
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+
+            if not data:
+                logger.warning(f"CoinMetrics returned no data on attempt {attempt + 1}.")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                else:
+                    logger.error("All attempts to fetch from CoinMetrics failed, no data received.")
+                    return pd.DataFrame()
+
+            df = pd.DataFrame(data)
+            df['date'] = pd.to_datetime(df['time'], utc=True)
+            df = df.set_index('date')
+            
+            for col in ["CapRealUSD", "SplyCur", "CapMrktCurUSD"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            
+            df["realised_price"] = df["CapRealUSD"] / df["SplyCur"]
+            df["nupl"] = (df["CapMrktCurUSD"] - df["CapRealUSD"]) / df["CapMrktCurUSD"]
+            
+            return df[["realised_price", "nupl"]]
+
+        except Exception as e:
+            logger.warning(f"Failed to fetch CoinMetrics data on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(5)
+            else:
+                logger.error("All retry attempts for CoinMetrics failed.")
+                return pd.DataFrame()
 
 
 # --- Main Ingestion Logic (Based on your original) ---
@@ -275,7 +304,6 @@ async def ingest_weekly(week_anchor=None, years=1):
 
 # --- This block allows running the script from the command line ---
 if __name__ == "__main__":
-    # *** THIS IS THE MODIFIED PART ***
     parser = argparse.ArgumentParser(description='Ingest historical market data.')
     parser.add_argument('--years', type=int, default=1, help='Number of years of historical data to fetch.')
     parser.add_argument('--date', type=str, default=None, help='Anchor date for the ingestion in YYYY-MM-DD format. Defaults to today.')
@@ -290,5 +318,4 @@ if __name__ == "__main__":
             print("❌ Error: Date format must be YYYY-MM-DD.")
             sys.exit(1)
     
-    # If no date is provided, anchor_date remains None and ingest_weekly will use the current time
     asyncio.run(ingest_weekly(week_anchor=anchor_date, years=args.years))
