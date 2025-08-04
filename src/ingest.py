@@ -88,17 +88,59 @@ def upsert_rows(conn, rows: List[Dict[str, Any]]):
     conn.commit()
 
 # ─── Fetch helpers ────────────────────────────────────────────────────────────
-async def fred_series(client, sid: str) -> pd.DataFrame:
-    """Return a daily FRED series, numeric; may contain NaN."""
-    url = FRED_URL.format(sid=sid)
-    r = await client.get(url, timeout=30)
-    r.raise_for_status()
-    df = pd.read_csv(io.StringIO(r.text), index_col=0, parse_dates=True)
-    df.index = df.index.tz_localize("UTC")
+async def fred_series(client: httpx.AsyncClient, sid: str) -> pd.DataFrame:
+    """
+    Robust FRED fetcher.
+
+    • If FRED_API_KEY is provided → use official API (recommended).
+    • Else try legacy /graph/fredgraph.csv?id=... endpoint.
+    • Any HTTP error → return empty DataFrame rather than raising.
+    """
     col = FRED_MAP[sid]
-    df.columns = [col]
-    df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df[[col]]
+    api_key = os.getenv("FRED_API_KEY")
+
+    # 1️⃣ New, preferred API
+    if api_key:
+        url = (
+            "https://api.stlouisfed.org/fred/series/observations"
+            f"?series_id={sid}&api_key={api_key}&observation_start=1900-01-01"
+            "&file_type=json"
+        )
+        try:
+            r = await client.get(url, timeout=30)
+            r.raise_for_status()
+            obs = r.json().get("observations", [])
+            df = pd.DataFrame(obs)[["date", "value"]]
+            df["date"] = pd.to_datetime(df["date"], utc=True)
+            df.set_index("date", inplace=True)
+            df.rename(columns={"value": col}, inplace=True)
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            return df[[col]]
+        except Exception as e:
+            logger.warning("FRED API fetch failed for %s (%s)", sid, e)
+
+    # 2️⃣ Legacy CSV fallback
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
+    try:
+        r = await client.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},  # helps dodge 404 redirect
+            timeout=30,
+        )
+        r.raise_for_status()
+        df = pd.read_csv(io.StringIO(r.text), index_col=0, parse_dates=True)
+        df.index = df.index.tz_localize("UTC")
+        df.columns = [col]
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df[[col]]
+    except httpx.HTTPStatusError as e:
+        logger.warning("Legacy FRED CSV 404 for %s – will fall back. (%s)", sid, e)
+    except Exception as e:
+        logger.warning("Unknown error fetching FRED legacy CSV %s: %s", sid, e)
+
+    # 3️⃣ Give caller an empty frame so downstream logic can decide
+    return pd.DataFrame(columns=[col])
+
 
 async def fetch_btc(client) -> pd.DataFrame:
     """BTC close from CoinGecko; fall back to Yahoo on failure."""
