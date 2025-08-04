@@ -15,6 +15,7 @@ import psycopg2
 import psycopg2.extras
 import yfinance as yf
 from dotenv import load_dotenv
+from typing import Any  # <-- Added missing import
 
 # Load environment
 load_dotenv()
@@ -54,7 +55,6 @@ def get_db_connection():
         raise RuntimeError("DATABASE_URL missing in .env")
     return psycopg2.connect(url)
 
-
 def _create_table_if_missing(conn):
     sql = '''
     CREATE TABLE IF NOT EXISTS btc_weekly (
@@ -67,7 +67,6 @@ def _create_table_if_missing(conn):
     with conn.cursor() as cur:
         cur.execute(sql)
     conn.commit()
-
 
 def _upsert_row(conn, row: dict[str, Any]):
     cols = ",".join(SCHEMA_COLUMNS)
@@ -101,14 +100,15 @@ async def _fetch_yahoo_gold(start: datetime, end: datetime) -> pd.DataFrame:
             warn("Yahoo gold: no data returned")
             return pd.DataFrame()
         if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.droplevel(0)
+            raw.columns = raw.columns.droplevel(0)  # fixed level
         col = "Adj Close" if "Adj Close" in raw.columns else "Close"
         if col not in raw.columns:
             warn(f"Yahoo gold missing column '{col}'")
             return pd.DataFrame()
         series = raw[col].copy()
         series.name = "gold_price"
-        series.index = pd.to_datetime(series.index).tz_localize("UTC")
+        # Use utc=True to avoid tz_localize errors
+        series.index = pd.to_datetime(series.index, utc=True)
         debug(f"Series shape: {series.shape}")
         return series.to_frame()
     except Exception as e:
@@ -122,7 +122,7 @@ async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime, end: date
         r = await client.get(COINGECKO_URL, params=params, timeout=30)
         r.raise_for_status()
         data = r.json().get("prices", [])
-        df = pd.DataFrame(data, columns=["ts", "price"] )
+        df = pd.DataFrame(data, columns=["ts", "price"])
         df["date"] = pd.to_datetime(df["ts"], unit="ms", utc=True).dt.floor("D")
         df = df.set_index("date")[['price']].rename(columns={'price':'close_usd'})
         debug(f"CoinGecko DF shape: {df.shape}")
@@ -145,14 +145,14 @@ async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime, end: date
         warn("Yahoo BTC: no data returned")
         return pd.DataFrame()
     if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.droplevel(1)
+        raw.columns = raw.columns.droplevel(0)  # fixed level
     col = "Adj Close" if "Adj Close" in raw.columns else "Close"
     if col not in raw.columns:
         warn(f"Yahoo BTC missing column '{col}'")
         return pd.DataFrame()
     series = raw[col].copy()
     series.name = "close_usd"
-    series.index = pd.to_datetime(series.index).tz_localize("UTC")
+    series.index = pd.to_datetime(series.index, utc=True)
     df = series.to_frame()
     debug(f"BTC series shape: {df.shape}")
     return df
@@ -188,7 +188,8 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, start: d
         r = await client.get(FRED_URL.format(series_id=series_id), timeout=30)
         r.raise_for_status()
         df = pd.read_csv(io.StringIO(r.text), index_col=0, parse_dates=True)
-        df.index = df.index.tz_localize('UTC')
+        # Use utc=True to avoid tz_localize errors
+        df.index = pd.to_datetime(df.index, utc=True)
         col = FRED_MAP.get(series_id, series_id.lower())
         df.columns = [col]
         df[col] = pd.to_numeric(df[col], errors='coerce')
