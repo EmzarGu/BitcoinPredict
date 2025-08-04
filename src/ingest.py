@@ -170,11 +170,13 @@ async def _fetch_fred_series(
 
 async def _fetch_yahoo_gold(start: datetime, end: datetime) -> pd.DataFrame:
     """
-    Fetch gold price via Yahoo Finance (ticker GC=F), returning a UTC-indexed
-    DataFrame with column 'gold_price'.
+    Fetch gold price via Yahoo Finance (ticker GC=F) over the full historical window,
+    returning a UTC-indexed DataFrame with column 'gold_price'.
     """
+    import pandas as _pd
     try:
-        df = await asyncio.to_thread(
+        # Download including end date
+        raw = await asyncio.to_thread(
             yf.download,
             "GC=F",
             start=start.strftime("%Y-%m-%d"),
@@ -182,18 +184,21 @@ async def _fetch_yahoo_gold(start: datetime, end: datetime) -> pd.DataFrame:
             auto_adjust=True,
             progress=False,
         )
-        if df.empty:
-            logger.warning("Yahoo gold fetch returned empty for GC=F")
-            return pd.DataFrame()
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(0)
-        price_col = "Adj Close" if "Adj Close" in df.columns else "Close"
-        if price_col not in df.columns:
-            logger.warning("Yahoo gold data has no '%s' column", price_col)
-            return pd.DataFrame()
-        series = df[price_col].copy()
+        if raw.empty:
+            logger.warning("Yahoo gold fetch returned empty for GC=F over %s to %s", start, end)
+            return _pd.DataFrame()
+        # Drop ticker-level if present
+        if isinstance(raw.columns, _pd.MultiIndex):
+            raw.columns = raw.columns.droplevel(0)
+        # Identify the price column
+        price_col = "Adj Close" if "Adj Close" in raw.columns else "Close"
+        if price_col not in raw.columns:
+            logger.warning("Yahoo gold data missing '%s' column", price_col)
+            return _pd.DataFrame()
+        # Build series
+        series = raw[price_col].copy()
         series.name = "gold_price"
-        series.index = pd.to_datetime(series.index).tz_localize("UTC")
+        series.index = _pd.to_datetime(series.index).tz_localize("UTC")
         return series.to_frame()
     except Exception as e:
         logger.warning(f"Yahoo gold fetch failed for GC=F: {e}")
