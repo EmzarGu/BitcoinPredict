@@ -199,6 +199,8 @@ async def _fetch_fred_series(
 
 # ─── Main ingestion ─────────────────────────────────────────────────────────
 async def ingest_weekly(week_anchor=None, years=1):
+    # Diagnose inputs
+    logger.debug(f"ingest_weekly called with week_anchor={week_anchor}, years={years}")
     # Accept date or datetime; normalize to UTC datetime
     if isinstance(week_anchor, datetime) and week_anchor.tzinfo is None:
         week_anchor = week_anchor.replace(tzinfo=timezone.utc)
@@ -208,6 +210,7 @@ async def ingest_weekly(week_anchor=None, years=1):
     now = week_anchor or datetime.now(timezone.utc)
     end_date = now
     start_date = end_date - timedelta(days=365 * years)
+    logger.debug(f"Date window: start_date={start_date}, end_date={end_date}")
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         tasks = {
@@ -220,6 +223,7 @@ async def ingest_weekly(week_anchor=None, years=1):
             'gold':    _fetch_yahoo_gold(start_date, end_date),
             'spx':     _fetch_fred_series(client, 'SP500', start_date, end_date),
         }
+        logger.debug(f"Launching fetch tasks: {list(tasks.keys())}")
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
         dfs: Dict[str, pd.DataFrame] = {}
         for key, result in zip(tasks.keys(), results):
@@ -228,19 +232,23 @@ async def ingest_weekly(week_anchor=None, years=1):
                 dfs[key] = pd.DataFrame()
             else:
                 dfs[key] = result
+            logger.debug(f"Fetched {key}: {dfs[key].shape}")
 
     if dfs['btc'].empty:
         logger.error("Bitcoin price unavailable – aborting ingest.")
         return
 
     df_all = pd.concat([df for df in dfs.values() if not df.empty], axis=1)
+    logger.debug(f"Combined df_all shape: {df_all.shape}")
     df_all = df_all.sort_index().ffill()
     df_all.dropna(subset=['close_usd'], inplace=True)
+    logger.debug(f"Post-ffill df_all shape: {df_all.shape}")
     if df_all.empty:
         logger.warning("No data after merge – aborting.")
         return
 
     weekly = df_all.resample('W-MON', label='left', closed='left').last()
+    logger.debug(f"Weekly resampled shape: {weekly.shape}")
     rows: List[Dict[str, Any]] = []
     for ts, row in weekly.iterrows():
         rec = {c: None for c in SCHEMA_COLUMNS}
@@ -248,6 +256,7 @@ async def ingest_weekly(week_anchor=None, years=1):
         for k, v in row.items():
             rec[k] = to_python_float(v)
         rows.append(rec)
+    logger.debug(f"Prepared {len(rows)} rows for upsert.")
 
     with get_db_connection() as conn:
         _create_table_if_missing(conn)
@@ -255,7 +264,7 @@ async def ingest_weekly(week_anchor=None, years=1):
             _upsert_row(conn, r)
         logger.info(f"✅ Upserted {len(rows)} weekly rows.")
 
-# ─── CLI ───────────────────────────────────────────────────────────────────
+# ─── CLI ─────────────────────────────────────────────────────────────────── ───────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser()
