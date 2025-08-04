@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 # ─── Configuration ──────────────────────────────────────────────────────────
 load_dotenv()
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)  # enable debug logs for diagnosis
 
 SCHEMA_COLUMNS: List[str] = [
     "week_start", "close_usd", "realised_price", "nupl",
@@ -85,6 +85,40 @@ def _upsert_row(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> No
     conn.commit()
 
 # ─── Fetch helpers ──────────────────────────────────────────────────────────
+async def _fetch_yahoo_gold(start: datetime, end: datetime) -> pd.DataFrame:
+    """
+    Fetch gold price via Yahoo Finance (ticker GC=F), over the full window.
+    Returns a DataFrame with column 'gold_price' and UTC index.
+    """
+    logger.debug(f"_fetch_yahoo_gold: start={start}, end={end}")
+    try:
+        raw = await asyncio.to_thread(
+            yf.download,
+            "GC=F",
+            start=start.strftime("%Y-%m-%d"),
+            end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
+            auto_adjust=True,
+            progress=False,
+        )
+        logger.debug(f"Raw yahoo data shape: {raw.shape}")
+        if raw.empty:
+            logger.warning(f"Yahoo gold fetch returned empty for GC=F over {start}–{end}")
+            return pd.DataFrame()
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.droplevel(0)
+        price_col = "Adj Close" if "Adj Close" in raw.columns else "Close"
+        if price_col not in raw.columns:
+            logger.warning(f"Yahoo gold data missing '{price_col}' column: cols={list(raw.columns)}")
+            return pd.DataFrame()
+        series = raw[price_col].copy()
+        series.name = "gold_price"
+        series.index = pd.to_datetime(series.index).tz_localize("UTC")
+        logger.debug(f"Extracted series shape: {series.shape}")
+        return series.to_frame()
+    except Exception as e:
+        logger.exception(f"Yahoo gold fetch failed for GC=F: {e}")
+        return pd.DataFrame()
+
 async def _fetch_coingecko(
     client: httpx.AsyncClient, start: datetime, end: datetime
 ) -> pd.DataFrame:
@@ -96,11 +130,9 @@ async def _fetch_coingecko(
         prices["date"] = pd.to_datetime(prices["ts"], unit="ms", utc=True).dt.floor("D")
         df = prices.set_index("date")[['price']].rename(columns={'price':'close_usd'})
         return df
-    except httpx.HTTPStatusError as e:
-        logger.warning(f"CoinGecko fetch failed ({e}); falling back to Yahoo Finance.")
     except Exception as e:
-        logger.warning(f"CoinGecko error ({e}); falling back to Yahoo Finance.")
-    # Fallback to Yahoo Finance
+        logger.warning(f"CoinGecko fetch failed ({e}); falling back to Yahoo Finance.")
+    # Fallback to Yahoo
     try:
         raw = await asyncio.to_thread(
             yf.download,
@@ -123,7 +155,6 @@ async def _fetch_coingecko(
     except Exception as e:
         logger.warning(f"Yahoo BTC fetch failed: {e}")
     return pd.DataFrame()
-
 
 async def _fetch_coinmetrics(
     client: httpx.AsyncClient, start_date: datetime, end_date: datetime
@@ -149,7 +180,6 @@ async def _fetch_coinmetrics(
     df['nupl'] = (df['CapMrktCurUSD'] - df['CapRealUSD']) / df['CapMrktCurUSD']
     return df[['realised_price','nupl']]
 
-
 async def _fetch_fred_series(
     client: httpx.AsyncClient, series_id: str, start: datetime, end: datetime
 ) -> pd.DataFrame:
@@ -165,47 +195,9 @@ async def _fetch_fred_series(
         return df[[col]].loc[start:end]
     except Exception as e:
         logger.warning(f"FRED fetch failed for {series_id}: {e}")
-    return pd.DataFrame()
-
-
-async def _fetch_yahoo_gold(start: datetime, end: datetime) -> pd.DataFrame:
-    """
-    Fetch gold price via Yahoo Finance (ticker GC=F) over the full historical window,
-    returning a UTC-indexed DataFrame with column 'gold_price'.
-    """
-    import pandas as _pd
-    try:
-        # Download including end date
-        raw = await asyncio.to_thread(
-            yf.download,
-            "GC=F",
-            start=start.strftime("%Y-%m-%d"),
-            end=(end + timedelta(days=1)).strftime("%Y-%m-%d"),
-            auto_adjust=True,
-            progress=False,
-        )
-        if raw.empty:
-            logger.warning("Yahoo gold fetch returned empty for GC=F over %s to %s", start, end)
-            return _pd.DataFrame()
-        # Drop ticker-level if present
-        if isinstance(raw.columns, _pd.MultiIndex):
-            raw.columns = raw.columns.droplevel(0)
-        # Identify the price column
-        price_col = "Adj Close" if "Adj Close" in raw.columns else "Close"
-        if price_col not in raw.columns:
-            logger.warning("Yahoo gold data missing '%s' column", price_col)
-            return _pd.DataFrame()
-        # Build series
-        series = raw[price_col].copy()
-        series.name = "gold_price"
-        series.index = _pd.to_datetime(series.index).tz_localize("UTC")
-        return series.to_frame()
-    except Exception as e:
-        logger.warning(f"Yahoo gold fetch failed for GC=F: {e}")
-    return pd.DataFrame()
+        return pd.DataFrame()
 
 # ─── Main ingestion ─────────────────────────────────────────────────────────
-# (No changes here; orchestration unchanged)
 async def ingest_weekly(week_anchor=None, years=1):
     if week_anchor and week_anchor.tzinfo is None:
         week_anchor = week_anchor.replace(tzinfo=timezone.utc)
@@ -215,17 +207,17 @@ async def ingest_weekly(week_anchor=None, years=1):
 
     async with httpx.AsyncClient(follow_redirects=True) as client:
         tasks = {
-            'btc':    _fetch_coingecko(client, start=start_date, end=end_date),
-            'cm':     _fetch_coinmetrics(client, start_date=start_date, end_date=end_date),
-            'fed_liq':_fetch_fred_series(client, 'WALCL', start_date, end_date),
-            'ecb_liq':_fetch_fred_series(client, 'ECBASSETS', start_date, end_date),
-            'dxy':    _fetch_fred_series(client, 'DTWEXBGS', start_date, end_date),
-            'ust10':  _fetch_fred_series(client, 'DGS10', start_date, end_date),
-            'gold':   _fetch_yahoo_gold(start_date, end_date),
-            'spx':    _fetch_fred_series(client, 'SP500', start_date, end_date),
+            'btc':     _fetch_coingecko(client, start=start_date, end=end_date),
+            'cm':      _fetch_coinmetrics(client, start_date=start_date, end_date=end_date),
+            'fed_liq': _fetch_fred_series(client, 'WALCL', start_date, end_date),
+            'ecb_liq': _fetch_fred_series(client, 'ECBASSETS', start_date, end_date),
+            'dxy':     _fetch_fred_series(client, 'DTWEXBGS', start_date, end_date),
+            'ust10':   _fetch_fred_series(client, 'DGS10', start_date, end_date),
+            'gold':    _fetch_yahoo_gold(start_date, end_date),
+            'spx':     _fetch_fred_series(client, 'SP500', start_date, end_date),
         }
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-        dfs = {}
+        dfs: Dict[str, pd.DataFrame] = {}
         for key, result in zip(tasks.keys(), results):
             if isinstance(result, Exception):
                 logger.warning(f"Task {key} failed: {result}")
