@@ -87,14 +87,17 @@ async def _fetch_yahoo_gold(start, end) -> pd.DataFrame:
         raw = await asyncio.to_thread(yf.download, "GC=F", start=start, end=end, auto_adjust=True, progress=False)
         if raw.empty: return pd.DataFrame()
         
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.droplevel(0)
+        # *** MODIFICATION STARTS HERE ***
+        # Handle the multi-level column index returned by yfinance
+        price_col_tuple = ('Close', 'GC=F')
+        if price_col_tuple not in raw.columns:
+            logger.warning(f"Required column '{price_col_tuple}' not found in Yahoo Finance gold data.")
+            return pd.DataFrame()
 
-        price_col = 'Adj Close' if 'Adj Close' in raw.columns else 'Close'
-        if price_col not in raw.columns: return pd.DataFrame()
-        
-        df = raw[[price_col]].copy()
-        df.columns = ["gold_price"]
+        df = raw[[price_col_tuple]].copy()
+        df.columns = ["gold_price"] # Rename the column
+        # *** MODIFICATION ENDS HERE ***
+
         df.index = pd.to_datetime(df.index, utc=True)
         return df
     except Exception as e:
@@ -114,17 +117,13 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, start, e
         df.columns = [column_name]
         df[column_name] = pd.to_numeric(df[column_name], errors='coerce')
 
-        # *** MODIFICATION STARTS HERE ***
-        # If the gold series data from FRED is empty or all NaN, fall back to Yahoo
         if series_id == "GOLDAMGBD228NLBM" and (df.empty or df[column_name].isna().all()):
             logger.warning("FRED data for gold is unavailable. Falling back to Yahoo Finance.")
             return await _fetch_yahoo_gold(start, end)
-        # *** MODIFICATION ENDS HERE ***
             
         return df[[column_name]]
     except Exception as e:
         logger.warning(f"Failed to fetch FRED series {series_id}: {e}")
-        # RESTORED: Your original fallback logic for gold price
         if series_id == "GOLDAMGBD228NLBM":
             logger.warning("Falling back to Yahoo Finance for gold price.")
             return await _fetch_yahoo_gold(start, end)
