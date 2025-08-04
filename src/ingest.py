@@ -84,7 +84,6 @@ def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
 async def _fetch_yahoo_gold(start, end) -> pd.DataFrame:
     """Specific fetcher for Gold from Yahoo as a fallback."""
     try:
-        # This is the verified function from our successful notebook test
         raw = await asyncio.to_thread(yf.download, "GC=F", start=start, end=end, auto_adjust=True, progress=False)
         if raw.empty:
             logger.warning("Yahoo Finance returned no data for gold.")
@@ -92,7 +91,7 @@ async def _fetch_yahoo_gold(start, end) -> pd.DataFrame:
 
         price_col_tuple = ('Close', 'GC=F')
         if price_col_tuple not in raw.columns:
-            logger.warning(f"Required column '{price_col_tuple}' not found in Yahoo Finance gold data.")
+            logger.warning(f"Required column '{price_col_tuple}' not found in Yahoo Finance gold data. Available columns: {raw.columns.tolist()}")
             return pd.DataFrame()
 
         df = raw[[price_col_tuple]].copy()
@@ -164,10 +163,9 @@ async def _fetch_yahoo_btc(start: datetime | None, end: datetime | None) -> pd.D
 async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame:
     """Fetches Bitcoin prices from CoinGecko, with Yahoo Finance as fallback."""
     try:
-        if start and end: # Prioritize Yahoo for specific ranges as in original
+        if start and end:
             return await _fetch_yahoo_btc(start, end)
 
-        # Your original CoinGecko logic with retries and fallback
         params = {"vs_currency": "usd", "days": 8, "interval": "daily"}
         resp = await client.get(COINGECKO_URL, params=params, timeout=30)
         resp.raise_for_status()
@@ -175,7 +173,7 @@ async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = N
         prices = pd.DataFrame(data.get("prices", []), columns=["ts", "price"])
         prices["date"] = pd.to_datetime(prices["ts"], unit="ms", utc=True).dt.floor("D")
         df = prices.set_index("date")[["price"]].rename(columns={"price": "close_usd"})
-        df["volume"] = pd.NA # Placeholder as per original
+        df["volume"] = pd.NA
         return df
 
     except Exception as e:
@@ -214,7 +212,6 @@ async def ingest_weekly(week_anchor=None, years=1):
 
     print("Fetching market data...")
     async with httpx.AsyncClient(follow_redirects=True) as client:
-        # This task setup is from your original script
         tasks = {
             "btc": _fetch_coingecko(client, start=start_date, end=end_date),
             "cm": _fetch_coinmetrics(client, start_date=start_date, end_date=end_date),
@@ -232,24 +229,45 @@ async def ingest_weekly(week_anchor=None, years=1):
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
-    # Correctly merge all dataframes
+    # *** DEBUGGING PRINTS START HERE ***
+    print("\n--- DEBUG: Inspecting dataframes before merge ---")
+    if not dataframes["gold"].empty:
+        print("Gold dataframe is NOT empty. Last 5 rows:")
+        print(dataframes["gold"].tail())
+    else:
+        print("Gold dataframe IS EMPTY.")
+
     merged_df = pd.concat([df for df in dataframes.values() if not df.empty], axis=1)
     if "volume" in merged_df.columns:
         merged_df = merged_df.drop(columns=["volume"])
     
+    print("\n--- DEBUG: After pd.concat, before ffill ---")
+    print("Columns in merged_df:", merged_df.columns.tolist())
+    print("Last 5 rows of merged_df:")
+    print(merged_df.tail())
+    print("Gold prices in last 5 rows:")
+    print(merged_df['gold_price'].tail())
+    
     merged_df = merged_df.sort_index().ffill()
+    
+    print("\n--- DEBUG: After ffill ---")
+    print("Last 5 rows of merged_df:")
+    print(merged_df.tail())
+    print("Gold prices in last 5 rows:")
+    print(merged_df['gold_price'].tail())
+    # *** DEBUGGING PRINTS END HERE ***
+
     merged_df.dropna(subset=['close_usd'], inplace=True)
 
     if merged_df.empty:
         print("No data to process after merging. Aborting.")
         return
     
-    # This logic correctly processes all weeks of data for backfill
     weekly_df = merged_df.resample('W-MON', label="left", closed="left").last()
     
     data_to_upsert = []
     for idx, row in weekly_df.iterrows():
-        if idx.date() < start_date.date(): continue # Skip data outside the requested range
+        if idx.date() < start_date.date(): continue
         final_row = row.to_dict()
         final_row['week_start'] = idx
         for key, value in final_row.items():
@@ -269,7 +287,6 @@ async def ingest_weekly(week_anchor=None, years=1):
         with get_db_connection() as conn:
             print("✅ Database connection successful.")
             _create_table_if_missing(conn)
-            # Loop to insert each row individually using your original _init_db logic
             for row_data in data_to_upsert:
                 _init_db(conn, row_data)
         print(f"✅ Successfully ingested and upserted {len(data_to_upsert)} weeks of data.")
