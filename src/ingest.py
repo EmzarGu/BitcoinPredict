@@ -229,34 +229,12 @@ async def ingest_weekly(week_anchor=None, years=1):
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
-    # *** DEBUGGING PRINTS START HERE ***
-    print("\n--- DEBUG: Inspecting dataframes before merge ---")
-    if not dataframes["gold"].empty:
-        print("Gold dataframe is NOT empty. Last 5 rows:")
-        print(dataframes["gold"].tail())
-    else:
-        print("Gold dataframe IS EMPTY.")
-
     merged_df = pd.concat([df for df in dataframes.values() if not df.empty], axis=1)
     if "volume" in merged_df.columns:
         merged_df = merged_df.drop(columns=["volume"])
     
-    print("\n--- DEBUG: After pd.concat, before ffill ---")
-    print("Columns in merged_df:", merged_df.columns.tolist())
-    print("Last 5 rows of merged_df:")
-    print(merged_df.tail())
-    print("Gold prices in last 5 rows:")
-    print(merged_df['gold_price'].tail())
-    
     merged_df = merged_df.sort_index().ffill()
     
-    print("\n--- DEBUG: After ffill ---")
-    print("Last 5 rows of merged_df:")
-    print(merged_df.tail())
-    print("Gold prices in last 5 rows:")
-    print(merged_df['gold_price'].tail())
-    # *** DEBUGGING PRINTS END HERE ***
-
     merged_df.dropna(subset=['close_usd'], inplace=True)
 
     if merged_df.empty:
