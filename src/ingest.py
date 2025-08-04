@@ -230,7 +230,14 @@ async def ingest_weekly(week_anchor=None, years=1):
             'gold':   _fetch_yahoo_gold(start_date, end_date),
             'spx':    _fetch_fred_series(client, 'SP500', start_date, end_date),
         }
-        results = await asyncio.gather(*tasks.values())
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        dfs = {}
+        for key, result in zip(tasks.keys(), results):
+            if isinstance(result, Exception):
+                logger.warning(f"Task {key} failed: {result}")
+                dfs[key] = pd.DataFrame()
+            else:
+                dfs[key] = result
         dfs = dict(zip(tasks.keys(), results))
 
     if dfs['btc'].empty:
