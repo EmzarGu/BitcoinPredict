@@ -45,6 +45,7 @@ def get_db_connection():
     return psycopg2.connect(database_url)
 
 def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
+    # ... (code is unchanged)
     create_sql = """
     CREATE TABLE IF NOT EXISTS btc_weekly (
         week_start TIMESTAMPTZ PRIMARY KEY,
@@ -57,6 +58,7 @@ def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
     conn.commit()
 
 def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
+    # ... (code is unchanged)
     _create_table_if_missing(conn)
     columns = ",".join(SCHEMA_COLUMNS)
     update = ",".join([f"{c} = EXCLUDED.{c}" for c in SCHEMA_COLUMNS[1:]])
@@ -70,25 +72,41 @@ def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
         )
     conn.commit()
 
-async def _fetch_yahoo_gold(start, end) -> pd.DataFrame:
+
+# --- THIS IS THE NEW, UNIFIED YAHOO FETCHER ---
+async def _fetch_yahoo_series(ticker: str, column_name: str, start: datetime, end: datetime) -> pd.DataFrame:
+    """Fetches any time series from Yahoo Finance and gives it a standard column name."""
     try:
-        raw = await asyncio.to_thread(yf.download, "GC=F", start=start, end=end, auto_adjust=True, progress=False)
+        raw = await asyncio.to_thread(yf.download, ticker, start=start, end=end, auto_adjust=True, progress=False)
         if raw.empty:
-            logger.warning("Yahoo Finance returned no data for gold.")
+            logger.warning(f"Yahoo Finance returned no data for {ticker}.")
             return pd.DataFrame()
 
-        price_col_tuple = ('Close', 'GC=F')
-        if price_col_tuple not in raw.columns:
-            logger.warning(f"Required column '{price_col_tuple}' not found in Yahoo Finance gold data. Available columns: {raw.columns.tolist()}")
-            return pd.DataFrame()
+        # Consistently handle single vs. multi-level columns
+        price_col = 'Close'
+        if isinstance(raw.columns, pd.MultiIndex):
+             price_col = ('Close', ticker)
 
-        df = raw[[price_col_tuple]].copy()
-        df.columns = ["gold_price"]
+        if price_col not in raw.columns:
+            # Fallback for older formats
+            price_col = 'Adj Close'
+            if isinstance(raw.columns, pd.MultiIndex):
+                price_col = ('Adj Close', ticker)
+            if price_col not in raw.columns:
+                 logger.warning(f"Required price column not found in Yahoo Finance data for {ticker}.")
+                 return pd.DataFrame()
+
+        df = raw[[price_col]].copy()
+        df.columns = [column_name] # Assign the standard name
         df.index = pd.to_datetime(df.index, utc=True)
+        # Add a placeholder volume column if it's the BTC ticker
+        if ticker == "BTC-USD":
+            df["volume"] = pd.NA
         return df
     except Exception as e:
-        logger.warning(f"An error occurred in _fetch_yahoo_gold: {e}")
+        logger.warning(f"An error occurred in _fetch_yahoo_series for {ticker}: {e}")
     return pd.DataFrame()
+
 
 async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, start, end) -> pd.DataFrame:
     url = FRED_URL.format(series_id=series_id)
@@ -103,44 +121,14 @@ async def _fetch_fred_series(client: httpx.AsyncClient, series_id: str, start, e
 
         if series_id == "GOLDAMGBD228NLBM" and (df.empty or df[column_name].isna().all()):
             logger.warning("FRED data for gold is unavailable. Falling back to Yahoo Finance.")
-            return await _fetch_yahoo_gold(start, end)
+            return await _fetch_yahoo_series("GC=F", "gold_price", start, end)
             
         return df[[column_name]]
     except Exception as e:
         logger.warning(f"Failed to fetch FRED series {series_id}: {e}")
         if series_id == "GOLDAMGBD228NLBM":
             logger.warning("Falling back to Yahoo Finance for gold price.")
-            return await _fetch_yahoo_gold(start, end)
-    return pd.DataFrame()
-
-async def _fetch_yahoo_btc(start: datetime | None, end: datetime | None) -> pd.DataFrame:
-    try:
-        kwargs = {"interval": "1d", "auto_adjust": False}
-        if start and end:
-            kwargs.update({"start": start, "end": end})
-        else:
-            kwargs.update({"period": "1mo"})
-
-        raw = await asyncio.to_thread(yf.download, "BTC-USD", **kwargs)
-        if raw.empty: return pd.DataFrame()
-
-        if isinstance(raw.columns, pd.MultiIndex):
-            raw.columns = raw.columns.droplevel(1)
-        
-        price_col = 'Adj Close' if 'Adj Close' in raw.columns else 'Close'
-        if price_col not in raw.columns: return pd.DataFrame()
-
-        series = raw[price_col]
-        if isinstance(series, pd.DataFrame):
-            series = series.iloc[:, 0]
-        
-        series.name = "close_usd"
-        series.index = pd.to_datetime(series.index, utc=True)
-        df = series.to_frame()
-        df["volume"] = pd.NA
-        return df[["close_usd", "volume"]]
-    except Exception as e:
-        logger.warning(f"Failed to fetch BTC from Yahoo Finance: {e}")
+            return await _fetch_yahoo_series("GC=F", "gold_price", start, end)
     return pd.DataFrame()
 
 async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None, end: datetime | None) -> pd.DataFrame:
@@ -162,9 +150,10 @@ async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None, en
 
     except Exception as e:
         logger.warning(f"CoinGecko failed ({e}), falling back to Yahoo Finance.")
-        return await _fetch_yahoo_btc(start, end)
+        return await _fetch_yahoo_series("BTC-USD", "close_usd", start, end)
 
 async def _fetch_onchain_metrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+    # ... (code is unchanged)
     params = {
         "assets": "btc",
         "metrics": "CapMrktCurUSD,CapRealUSD,SplyCur",
@@ -203,7 +192,9 @@ async def _fetch_onchain_metrics(client: httpx.AsyncClient, start_date: datetime
     logger.error("All attempts to fetch on-chain metrics failed.")
     return pd.DataFrame()
 
+
 async def ingest_weekly(week_anchor=None, years=1):
+    # ... (code is unchanged, but now calls the unified Yahoo fetcher)
     now = week_anchor or datetime.now(timezone.utc)
     end_date = now
     start_date = end_date - timedelta(days=365 * years)
@@ -227,15 +218,12 @@ async def ingest_weekly(week_anchor=None, years=1):
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
-    # --- THIS IS THE DE-DUPLICATION FIX ---
     cleaned_dfs = []
     for name, df in dataframes.items():
         if not df.empty and not df.index.is_unique:
-            # Keep the last entry for any duplicate dates and drop the rest
             df = df.loc[~df.index.duplicated(keep='last')]
         cleaned_dfs.append(df)
 
-    # Use the cleaned dataframes for the final merge
     merged_df = pd.concat([df for df in cleaned_dfs if not df.empty], axis=1)
     
     if "volume" in merged_df.columns:
@@ -281,6 +269,7 @@ async def ingest_weekly(week_anchor=None, years=1):
         print(f"❌ An error occurred during the database operation: {e}")
 
 if __name__ == "__main__":
+    # ... (code is unchanged)
     parser = argparse.ArgumentParser(description='Ingest historical market data.')
     parser.add_argument('--years', type=int, default=1, help='Number of years of historical data to fetch.')
     parser.add_argument('--date', type=str, default=None, help='Anchor date for the ingestion in YYYY-MM-DD format. Defaults to today.')
