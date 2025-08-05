@@ -228,7 +228,16 @@ async def ingest_weekly(week_anchor=None, years=1):
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
-    merged_df = pd.concat([df for df in dataframes.values() if not df.empty], axis=1)
+    # --- THIS IS THE DE-DUPLICATION FIX ---
+    cleaned_dfs = []
+    for name, df in dataframes.items():
+        if not df.empty and not df.index.is_unique:
+            df = df.loc[~df.index.duplicated(keep='last')]
+        cleaned_dfs.append(df)
+
+    merged_df = pd.concat([df for df in cleaned_dfs if not df.empty], axis=1)
+    # ------------------------------------
+    
     if "volume" in merged_df.columns:
         merged_df = merged_df.drop(columns=["volume"])
     
