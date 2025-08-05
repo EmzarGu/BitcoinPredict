@@ -143,7 +143,7 @@ async def _fetch_yahoo_btc(start: datetime | None, end: datetime | None) -> pd.D
         logger.warning(f"Failed to fetch BTC from Yahoo Finance: {e}")
     return pd.DataFrame()
 
-async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame:
+async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None, end: datetime | None) -> pd.DataFrame:
     try:
         if start and end:
             days = (end - start).days
@@ -165,7 +165,6 @@ async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = N
         return await _fetch_yahoo_btc(start, end)
 
 async def _fetch_onchain_metrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
-    """Fetches foundational on-chain metrics and calculates realised_price and nupl."""
     params = {
         "assets": "btc",
         "metrics": "CapMrktCurUSD,CapRealUSD,SplyCur",
@@ -228,12 +227,15 @@ async def ingest_weekly(week_anchor=None, years=1):
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
+    # --- THIS IS THE DE-DUPLICATION FIX ---
     cleaned_dfs = []
     for name, df in dataframes.items():
         if not df.empty and not df.index.is_unique:
+            # Keep the last entry for any duplicate dates and drop the rest
             df = df.loc[~df.index.duplicated(keep='last')]
         cleaned_dfs.append(df)
 
+    # Use the cleaned dataframes for the final merge
     merged_df = pd.concat([df for df in cleaned_dfs if not df.empty], axis=1)
     
     if "volume" in merged_df.columns:
