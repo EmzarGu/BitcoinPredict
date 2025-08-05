@@ -8,7 +8,6 @@ import psycopg2
 
 logger = logging.getLogger(__name__)
 
-
 FEATURE_COLS: List[str] = [
     "Momentum_4w",
     "Momentum_12w",
