@@ -27,7 +27,6 @@ SCHEMA_COLUMNS: List[str] = [
 COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
 COINMETRICS_URL = "https://community-api.coinmetrics.io/v4/timeseries/asset-metrics"
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-FRED_API_KEY = os.getenv("FRED_API_KEY")
 
 FRED_COLUMN_MAP = {
     "WALCL": "fed_liq", "ECBASSETS": "ecb_liq", "DTWEXBGS": "dxy",
@@ -147,10 +146,12 @@ async def _fetch_yahoo_btc(start: datetime | None, end: datetime | None) -> pd.D
 async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = None, end: datetime | None = None) -> pd.DataFrame:
     try:
         if start and end:
-            return await _fetch_yahoo_btc(start, end)
-
-        params = {"vs_currency": "usd", "days": 8, "interval": "daily"}
-        resp = await client.get(COINGECKO_URL, params=params, timeout=30)
+            days = (end - start).days
+            params = {"vs_currency": "usd", "days": days if days > 0 else 1, "interval": "daily"}
+        else:
+            params = {"vs_currency": "usd", "days": "max", "interval": "daily"}
+            
+        resp = await client.get(COINGECKO_URL, params=params, timeout=120)
         resp.raise_for_status()
         data = resp.json()
         prices = pd.DataFrame(data.get("prices", []), columns=["ts", "price"])
@@ -163,56 +164,48 @@ async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None = N
         logger.warning(f"CoinGecko failed ({e}), falling back to Yahoo Finance.")
         return await _fetch_yahoo_btc(start, end)
 
-async def _fetch_coinmetrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
-    print("--- DEBUG: Attempting to fetch from CoinMetrics ---")
+async def _fetch_onchain_metrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+    """Fetches foundational on-chain metrics and calculates realised_price and nupl."""
     params = {
         "assets": "btc",
-        "metrics": "CapRealUSD,SplyCur,CapMrktCurUSD",
+        "metrics": "CapMrktCurUSD,CapRealUSD,SplyCur",
         "frequency": "1d",
         "start_time": start_date.strftime("%Y-%m-%d"),
-        "end_time": end_date.strftime("%Y-%m-%d")
+        "end_time": end_date.strftime("%Y-%m-%d"),
+        "page_size": 10000
     }
     
     max_retries = 3
     for attempt in range(max_retries):
         try:
-            resp = await client.get(COINMETRICS_URL, params=params, timeout=30)
+            resp = await client.get(COINMETRICS_URL, params=params, timeout=120)
             resp.raise_for_status()
             data = resp.json().get("data", [])
 
-            if not data:
-                print(f"--- DEBUG: CoinMetrics returned no data on attempt {attempt + 1} ---")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(5)
-                    continue
-                else:
-                    print("--- DEBUG: All CoinMetrics attempts failed, returning empty DataFrame. ---")
-                    return pd.DataFrame()
+            if data:
+                df = pd.DataFrame(data)
+                df['date'] = pd.to_datetime(df['time'], utc=True)
+                df = df.set_index('date')
+                for col in ["CapMrktCurUSD", "CapRealUSD", "SplyCur"]:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                
+                df["realised_price"] = df["CapRealUSD"] / df["SplyCur"]
+                df["nupl"] = (df["CapMrktCurUSD"] - df["CapRealUSD"]) / df["CapMrktCurUSD"]
+                
+                return df[["realised_price", "nupl"]]
 
-            print("--- DEBUG: CoinMetrics data received successfully. ---")
-            df = pd.DataFrame(data)
-            df['date'] = pd.to_datetime(df['time'], utc=True)
-            df = df.set_index('date')
-            
-            for col in ["CapRealUSD", "SplyCur", "CapMrktCurUSD"]:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-            
-            df["realised_price"] = df["CapRealUSD"] / df["SplyCur"]
-            df["nupl"] = (df["CapMrktCurUSD"] - df["CapRealUSD"]) / df["CapMrktCurUSD"]
-            
-            return df[["realised_price", "nupl"]]
+            logger.warning(f"On-chain metrics returned no data on attempt {attempt + 1}.")
+            if attempt < max_retries - 1: await asyncio.sleep(5)
 
         except Exception as e:
-            print(f"--- DEBUG: Error fetching CoinMetrics on attempt {attempt + 1}: {e} ---")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(5)
-            else:
-                print("--- DEBUG: All retry attempts for CoinMetrics failed. ---")
-                return pd.DataFrame()
+            logger.warning(f"Failed to fetch on-chain metrics on attempt {attempt + 1}: {e}")
+            if attempt < max_retries - 1: await asyncio.sleep(5)
+
+    logger.error("All attempts to fetch on-chain metrics failed.")
+    return pd.DataFrame()
 
 async def ingest_weekly(week_anchor=None, years=1):
     now = week_anchor or datetime.now(timezone.utc)
-    week_start_date = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
     end_date = now
     start_date = end_date - timedelta(days=365 * years)
 
@@ -220,7 +213,7 @@ async def ingest_weekly(week_anchor=None, years=1):
     async with httpx.AsyncClient(follow_redirects=True) as client:
         tasks = {
             "btc": _fetch_coingecko(client, start=start_date, end=end_date),
-            "cm": _fetch_coinmetrics(client, start_date=start_date, end_date=end_date),
+            "onchain": _fetch_onchain_metrics(client, start_date=start_date, end_date=end_date),
             "fed_liq": _fetch_fred_series(client, "WALCL", start_date, end_date),
             "ecb_liq": _fetch_fred_series(client, "ECBASSETS", start_date, end_date),
             "dxy": _fetch_fred_series(client, "DTWEXBGS", start_date, end_date),
@@ -235,49 +228,22 @@ async def ingest_weekly(week_anchor=None, years=1):
         print("❌ Critical error: Could not fetch Bitcoin data. Aborting.")
         return
 
-    print("\n--- DEBUG: Inspecting dataframes before merge ---")
-    if not dataframes["gold"].empty:
-        print("Gold dataframe is NOT empty. Last 5 rows:")
-        print(dataframes["gold"].tail())
-    else:
-        print("Gold dataframe IS EMPTY.")
-    if not dataframes["cm"].empty:
-        print("CoinMetrics dataframe is NOT empty. Last 5 rows:")
-        print(dataframes["cm"].tail())
-    else:
-        print("CoinMetrics dataframe IS EMPTY.")
-
     merged_df = pd.concat([df for df in dataframes.values() if not df.empty], axis=1)
     if "volume" in merged_df.columns:
         merged_df = merged_df.drop(columns=["volume"])
     
-    print("\n--- DEBUG: After pd.concat, before ffill ---")
-    print("Last 5 rows of merged_df:")
-    print(merged_df.tail())
-    if 'realised_price' in merged_df.columns:
-        print("Realised prices in last 5 rows:")
-        print(merged_df['realised_price'].tail())
-    else:
-        print("Realised price column MISSING after concat.")
-    
     merged_df = merged_df.sort_index().ffill()
     
-    print("\n--- DEBUG: After ffill ---")
-    print("Last 5 rows of merged_df:")
-    print(merged_df.tail())
-    if 'realised_price' in merged_df.columns:
-        print("Realised prices in last 5 rows:")
-        print(merged_df['realised_price'].tail())
-    else:
-        print("Realised price column MISSING after ffill.")
-
     merged_df.dropna(subset=['close_usd'], inplace=True)
 
     if merged_df.empty:
         print("No data to process after merging. Aborting.")
         return
     
-    weekly_df = merged_df.resample('W-MON', label="left", closed="left").last()
+    weekly_df = merged_df.resample('W-MON', label="left", closed="left").agg({
+        'close_usd': 'last', 'realised_price': 'mean', 'nupl': 'mean', 'fed_liq': 'mean',
+        'ecb_liq': 'mean', 'dxy': 'mean', 'ust10': 'mean', 'gold_price': 'mean', 'spx_index': 'mean'
+    })
     
     data_to_upsert = []
     for idx, row in weekly_df.iterrows():
@@ -285,11 +251,9 @@ async def ingest_weekly(week_anchor=None, years=1):
         final_row = row.to_dict()
         final_row['week_start'] = idx
         for key, value in final_row.items():
-            if key != 'week_start':
-                final_row[key] = to_python_float(value)
+            if key != 'week_start': final_row[key] = to_python_float(value)
         for col in SCHEMA_COLUMNS:
-            if col not in final_row:
-                final_row[col] = None
+            if col not in final_row: final_row[col] = None
         data_to_upsert.append(final_row)
 
     if not data_to_upsert:
