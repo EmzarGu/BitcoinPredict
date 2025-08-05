@@ -45,7 +45,6 @@ def get_db_connection():
     return psycopg2.connect(database_url)
 
 def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
-    # ... (code is unchanged)
     create_sql = """
     CREATE TABLE IF NOT EXISTS btc_weekly (
         week_start TIMESTAMPTZ PRIMARY KEY,
@@ -58,7 +57,6 @@ def _create_table_if_missing(conn: psycopg2.extensions.connection) -> None:
     conn.commit()
 
 def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
-    # ... (code is unchanged)
     _create_table_if_missing(conn)
     columns = ",".join(SCHEMA_COLUMNS)
     update = ",".join([f"{c} = EXCLUDED.{c}" for c in SCHEMA_COLUMNS[1:]])
@@ -73,35 +71,27 @@ def _init_db(conn: psycopg2.extensions.connection, row: Dict[str, Any]) -> None:
     conn.commit()
 
 
-# --- THIS IS THE NEW, UNIFIED YAHOO FETCHER ---
 async def _fetch_yahoo_series(ticker: str, column_name: str, start: datetime, end: datetime) -> pd.DataFrame:
-    """Fetches any time series from Yahoo Finance and gives it a standard column name."""
+    """Fetches any time series from Yahoo Finance and handles different column formats."""
     try:
         raw = await asyncio.to_thread(yf.download, ticker, start=start, end=end, auto_adjust=True, progress=False)
         if raw.empty:
             logger.warning(f"Yahoo Finance returned no data for {ticker}.")
             return pd.DataFrame()
 
-        # Consistently handle single vs. multi-level columns
-        price_col = 'Close'
-        if isinstance(raw.columns, pd.MultiIndex):
-             price_col = ('Close', ticker)
-
+        price_col = 'Adj Close'
         if price_col not in raw.columns:
-            # Fallback for older formats
-            price_col = 'Adj Close'
-            if isinstance(raw.columns, pd.MultiIndex):
-                price_col = ('Adj Close', ticker)
+            price_col = 'Close'
             if price_col not in raw.columns:
-                 logger.warning(f"Required price column not found in Yahoo Finance data for {ticker}.")
+                 logger.warning(f"Required price column not found for {ticker}.")
                  return pd.DataFrame()
 
         df = raw[[price_col]].copy()
-        df.columns = [column_name] # Assign the standard name
+        df.columns = [column_name]
         df.index = pd.to_datetime(df.index, utc=True)
-        # Add a placeholder volume column if it's the BTC ticker
+
         if ticker == "BTC-USD":
-            df["volume"] = pd.NA
+            df["volume"] = raw['Volume'] if 'Volume' in raw.columns else pd.NA
         return df
     except Exception as e:
         logger.warning(f"An error occurred in _fetch_yahoo_series for {ticker}: {e}")
@@ -153,7 +143,6 @@ async def _fetch_coingecko(client: httpx.AsyncClient, start: datetime | None, en
         return await _fetch_yahoo_series("BTC-USD", "close_usd", start, end)
 
 async def _fetch_onchain_metrics(client: httpx.AsyncClient, start_date: datetime, end_date: datetime) -> pd.DataFrame:
-    # ... (code is unchanged)
     params = {
         "assets": "btc",
         "metrics": "CapMrktCurUSD,CapRealUSD,SplyCur",
@@ -194,7 +183,6 @@ async def _fetch_onchain_metrics(client: httpx.AsyncClient, start_date: datetime
 
 
 async def ingest_weekly(week_anchor=None, years=1):
-    # ... (code is unchanged, but now calls the unified Yahoo fetcher)
     now = week_anchor or datetime.now(timezone.utc)
     end_date = now
     start_date = end_date - timedelta(days=365 * years)
@@ -269,7 +257,6 @@ async def ingest_weekly(week_anchor=None, years=1):
         print(f"❌ An error occurred during the database operation: {e}")
 
 if __name__ == "__main__":
-    # ... (code is unchanged)
     parser = argparse.ArgumentParser(description='Ingest historical market data.')
     parser.add_argument('--years', type=int, default=1, help='Number of years of historical data to fetch.')
     parser.add_argument('--date', type=str, default=None, help='Anchor date for the ingestion in YYYY-MM-DD format. Defaults to today.')
