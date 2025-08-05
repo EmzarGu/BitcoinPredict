@@ -4,6 +4,15 @@ from sklearn.linear_model import BayesianRidge
 import joblib
 import os
 from pathlib import Path
+import sys
+
+# --- THIS IS THE FIX ---
+# Add the project's root directory to the Python path
+# This allows the script to find the 'src' module
+project_root = Path(__file__).resolve().parents[1]
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
+# ---------------------
 
 # Import the feature building function from your existing script
 from src.features import build_features
