@@ -5,23 +5,21 @@ from typing import List
 
 import pandas as pd
 import psycopg2
+from dotenv import load_dotenv # Import the function
+
+# --- THIS IS THE FIX ---
+# Load environment variables from the .env file
+# This ensures DATABASE_URL is always available to the script.
+load_dotenv()
+# ---------------------
 
 logger = logging.getLogger(__name__)
 
 FEATURE_COLS: List[str] = [
-    "Momentum_4w",
-    "Momentum_12w",
-    "Momentum_26w",
-    "Realised_Price_Delta",
-    "nupl",
-    "dxy_z",
-    "ust10_z",
-    "gold_price_z",
-    "spx_index_z",
-    "DXY_Invert",
-    "Target",
+    "Momentum_4w", "Momentum_12w", "Momentum_26w", "Realised_Price_Delta",
+    "nupl", "dxy_z", "ust10_z", "gold_price_z", "spx_index_z",
+    "DXY_Invert", "Target",
 ]
-
 
 def _load_btc_weekly() -> pd.DataFrame:
     """Load btc_weekly data from the database or CSV fallback."""
@@ -39,8 +37,9 @@ def _load_btc_weekly() -> pd.DataFrame:
             df["week_start"] = pd.to_datetime(df["week_start"], utc=True)
             df = df.sort_values("week_start").reset_index(drop=True)
             return df
-        except Exception as exc:  # pragma: no cover - fallback path
+        except Exception as exc:
             logger.warning("Failed to read database: %s", exc)
+    
     try:
         df = pd.read_csv("data/btc_weekly_latest.csv")
         df["week_start"] = pd.to_datetime(df["week_start"], utc=True)
@@ -49,17 +48,7 @@ def _load_btc_weekly() -> pd.DataFrame:
         return df
     except FileNotFoundError:
         logger.error("No data source found for btc_weekly")
-        return pd.DataFrame(columns=[
-            "week_start",
-            "close_usd",
-            "realised_price",
-            "nupl",
-            "dxy",
-            "ust10",
-            "gold_price",
-            "spx_index",
-        ])
-
+        return pd.DataFrame()
 
 def build_features(lookback_weeks: int = 260) -> pd.DataFrame:
     """Build feature dataframe from btc_weekly raw data."""
@@ -79,19 +68,15 @@ def build_features(lookback_weeks: int = 260) -> pd.DataFrame:
     for col in ["dxy", "ust10", "gold_price", "spx_index"]:
         rolling = df[col].rolling(window=52)
         df[f"{col}_z"] = (df[col] - rolling.mean()) / rolling.std()
+    
     df["DXY_Invert"] = 1 / df["dxy"]
 
     df["Target"] = df["close_usd"].shift(-4) / df["close_usd"] - 1
 
-    df = df.tail(lookback_weeks + 52 + 4)  # ensure lookback window
-
     df = df.dropna(subset=FEATURE_COLS)
-
     df = df.tail(lookback_weeks)
-
     df = df.sort_index()
     return df
-
 
 def save_latest_features(df: pd.DataFrame, path: str = "artifacts/features_latest.parquet") -> None:
     """Save the most recent feature row to a parquet file."""
@@ -104,8 +89,8 @@ def save_latest_features(df: pd.DataFrame, path: str = "artifacts/features_lates
     latest.to_parquet(dest)
     logger.info("Saved latest features to %s", dest)
 
-
 if __name__ == "__main__":
     features = build_features()
     save_latest_features(features)
+    print("--- Feature DataFrame ---")
     print(features.tail(3))
