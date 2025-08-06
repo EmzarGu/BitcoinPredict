@@ -92,7 +92,7 @@ def generate_forecast(forecast_date: str = None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate a Bitcoin forecast for a specific date.')
-    parser.add_argument('--date', type=str, help='The date for the forecast in YYYY-MM-DD format.')
+    parser.add_argument('--date', type=str, help='The date for the forecast in YYY-MM-DD format.')
     args = parser.parse_args()
     
     generate_forecast(args.date)
