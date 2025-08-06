@@ -39,11 +39,14 @@ def generate_forecast(forecast_date: str = None):
     training_cols = classifier.get_booster().feature_names
     X_latest = latest_features[training_cols]
     
-    # --- 2. Calculate Historical Volatility ---
-    daily_returns = features_df['close_usd'].pct_change()
-    annual_volatility = daily_returns.std() * np.sqrt(365)
-    volatility_4w = annual_volatility / np.sqrt(52/4)
-    volatility_12w = annual_volatility / np.sqrt(52/12)
+    # --- 2. Calculate Historical Errors for Meaningful Ranges ---
+    y_4w_df = features_df[['Target']].dropna()
+    X_4w = features_df.loc[y_4w_df.index][training_cols]
+    errors_4w = y_4w_df['Target'] - price_target_4w_model.predict(X_4w)
+    
+    y_12w_df = features_df[['Target_12w']].dropna()
+    X_12w = features_df.loc[y_12w_df.index][training_cols]
+    errors_12w = y_12w_df['Target_12w'] - price_target_12w_model.predict(X_12w)
 
     # --- 3. Implement Liquidity Regime Filter ---
     features_df['Liquidity_Z'] = -features_df['dxy_z']
@@ -62,16 +65,17 @@ def generate_forecast(forecast_date: str = None):
     # 4-Week Forecast
     return_4w = price_target_4w_model.predict(X_latest)[0]
     price_target_4w = last_close_price * (1 + return_4w)
-    
-    lower_bound_4w = price_target_4w * (1 - volatility_4w * (1 + direction_probabilities[0] - direction_probabilities[2]))
-    upper_bound_4w = price_target_4w * (1 + volatility_4w * (1 - direction_probabilities[0] + direction_probabilities[2]))
+    # The range is the target +/- the 80th percentile of historical errors
+    range_modifier_4w = np.percentile(np.abs(errors_4w), 80)
+    lower_bound_4w = price_target_4w * (1 - range_modifier_4w)
+    upper_bound_4w = price_target_4w * (1 + range_modifier_4w)
 
     # 12-Week Forecast
     return_12w = price_target_12w_model.predict(X_latest)[0]
     price_target_12w = last_close_price * (1 + return_12w)
-
-    lower_bound_12w = price_target_12w * (1 - volatility_12w * (1 + direction_probabilities[0] - direction_probabilities[2]))
-    upper_bound_12w = price_target_12w * (1 + volatility_12w * (1 - direction_probabilities[0] + direction_probabilities[2]))
+    range_modifier_12w = np.percentile(np.abs(errors_12w), 80)
+    lower_bound_12w = price_target_12w * (1 - range_modifier_12w)
+    upper_bound_12w = price_target_12w * (1 + range_modifier_12w)
     
     # --- 5. Assemble and Print Final Forecast ---
     print("\n--- Final, Unified Forecast ---")
@@ -88,7 +92,7 @@ def generate_forecast(forecast_date: str = None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate a Bitcoin forecast for a specific date.')
-    parser.add_argument('--date', type=str, help='The date for the forecast in YYYY-MM-DD format.')
+    parser.add_argument('--date', type=str, help='The date for the forecast in YYY-MM-DD format.')
     args = parser.parse_args()
     
     generate_forecast(args.date)
