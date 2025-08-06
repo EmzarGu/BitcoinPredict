@@ -3,6 +3,8 @@ import joblib
 from pathlib import Path
 import sys
 import numpy as np
+import argparse # Import argparse
+from datetime import datetime
 
 # --- Add project root to Python path ---
 project_root = Path(__file__).resolve().parents[1]
@@ -11,33 +13,47 @@ if str(project_root) not in sys.path:
     
 from src.features import build_features
 
-def generate_forecast():
+def generate_forecast(forecast_date: str = None):
     """
-    Loads the latest features and trained models to generate the weekly forecast,
-    including the Liquidity Regime Filter adjustment.
+    Loads features and models to generate a forecast for a specific date.
+    If no date is provided, it forecasts for the latest available date.
     """
-    print("--- Generating Weekly Bitcoin Forecast ---")
+    print("--- Generating Bitcoin Forecast ---")
 
     # --- 1. Load Models and Features ---
     models_dir = Path("artifacts/models")
-    features_df = build_features() # We need the full history to calculate rolling averages
+    features_df = build_features()
 
     if features_df.empty:
-        print("❌ Error: Could not build features. Aborting forecast.")
+        print("❌ Error: Could not build features.")
         return
-        
-    latest_features = features_df.tail(1)
+
+    # --- THIS IS THE NEW LOGIC ---
+    if forecast_date:
+        try:
+            # Select the data for the specific week of the forecast date
+            target_date = pd.to_datetime(forecast_date, utc=True)
+            # Find the feature row for the Monday of that week
+            latest_features = features_df.loc[features_df.index.to_period('W-MON') == target_date.to_period('W-MON')]
+            if latest_features.empty:
+                print(f"❌ Error: No data found for the week of {forecast_date}.")
+                return
+            print(f"✅ Generating forecast for the week of: {latest_features.index[0].strftime('%Y-%m-%d')}")
+        except Exception as e:
+            print(f"❌ Error processing date: {e}")
+            return
+    else:
+        # Default to the latest available features
+        latest_features = features_df.tail(1)
+        print(f"✅ Generating forecast for the latest available week: {latest_features.index[0].strftime('%Y-%m-%d')}")
 
     classifier = joblib.load(models_dir / "direction_classifier.joblib")
     bayesian_model = joblib.load(models_dir / "level_forecaster_bayesian.joblib")
     xgboost_regressor = joblib.load(models_dir / "level_forecaster_xgboost.joblib")
     
-    print("✅ Models and latest features loaded successfully.")
-
     X_latest = latest_features.drop(columns=['Target'])
 
     # --- 2. Implement Liquidity Regime Filter ---
-    # We use the full features_df to get the necessary historical data for the rolling average
     features_df['Liquidity_Z'] = -features_df['dxy_z']
     features_df['DXY_26w_MA'] = features_df['dxy'].rolling(window=26).mean()
     features_df['DXY_26w_trend'] = features_df['dxy'] / features_df['DXY_26w_MA']
@@ -47,37 +63,33 @@ def generate_forecast():
         True, False
     )
     
-    # Get the regime for the most recent week
-    current_regime_is_risk_on = features_df['Risk-On'].iloc[-1]
+    current_regime_is_risk_on = features_df.loc[latest_features.index, 'Risk-On'].iloc[0]
     regime_status = "Risk-On" if current_regime_is_risk_on else "Risk-Off"
-    print(f"✅ Current Macro Regime detected: {regime_status}")
+    print(f"✅ Macro Regime detected: {regime_status}")
 
-    # --- 3. Generate Forecast Components ---
+    # --- 3. Generate and Adjust Forecast ---
     direction_probabilities = classifier.predict_proba(X_latest)[0]
     
-    # --- 4. Adjust Forecast Based on Regime ---
     if not current_regime_is_risk_on:
         print("... Adjusting forecast for Risk-Off conditions ...")
         bullish_prob = direction_probabilities[2]
-        # Reduce bullish probability by 30% (relative) and redistribute
         reduction = bullish_prob * 0.30
         direction_probabilities[2] -= reduction
-        direction_probabilities[1] += reduction # Add the reduction to the neutral probability
+        direction_probabilities[1] += reduction
     
     direction_map = {0: "Bearish", 1: "Neutral", 2: "Bullish"}
     predicted_class_index = np.argmax(direction_probabilities)
     direction = direction_map[predicted_class_index]
 
-    bayesian_pred = bayesian_model.predict(X_latest)[0]
+    bayesian_pred, std_dev = bayesian_model.predict(X_latest, return_std=True)
+    bayesian_pred = bayesian_pred[0]
+    std_dev = std_dev[0]
     xgboost_pred = xgboost_regressor.predict(X_latest)[0]
     
     blended_return = (bayesian_pred + xgboost_pred) / 2
     last_close_price = X_latest['close_usd'].iloc[0]
     price_target = last_close_price * (1 + blended_return)
 
-    _, std_dev = bayesian_model.predict(X_latest, return_std=True)
-    std_dev = std_dev[0]
-    
     lower_bound_return = blended_return - (0.84 * std_dev)
     upper_bound_return = blended_return + (0.84 * std_dev)
     price_range = [
@@ -85,9 +97,10 @@ def generate_forecast():
         last_close_price * (1 + upper_bound_return)
     ]
 
-    # --- 5. Assemble and Print Final Forecast ---
+    # --- 4. Assemble and Print Final Forecast ---
     forecast = {
         "reference_week": X_latest.index[0].strftime('%Y-%m-%d'),
+        "last_known_price": f"${last_close_price:,.2f}",
         "macro_regime": regime_status,
         "directional_outlook": direction,
         "probabilities": {
@@ -104,4 +117,8 @@ def generate_forecast():
         print(f"{key.replace('_', ' ').title()}: {value}")
 
 if __name__ == "__main__":
-    generate_forecast()
+    parser = argparse.ArgumentParser(description='Generate a Bitcoin forecast for a specific date.')
+    parser.add_argument('--date', type=str, help='The date for the forecast in YYYY-MM-DD format. Defaults to the latest available data.')
+    args = parser.parse_args()
+    
+    generate_forecast(args.date)
