@@ -51,6 +51,11 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     - If for_training=True, it returns a limited lookback window.
     - If for_training=False, it returns the full historical dataframe.
     """
+    # --- DEBUG PRINTS START HERE ---
+    print("\n--- DEBUG (features.py): Running build_features ---")
+    print(f"--- DEBUG (features.py): 'for_training' flag is set to: {for_training} ---")
+    # ------------------------------------
+
     df = _load_btc_weekly()
     if df.empty:
         return df
@@ -72,11 +77,9 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
 
     df["Target"] = df["close_usd"].shift(-4) / df["close_usd"] - 1
     df["Target_12w"] = df["close_usd"].shift(-12) / df["close_usd"] - 1
-
+    
     if for_training:
-        # Define predictor columns (all features except the targets)
         predictor_cols = [col for col in FEATURE_COLS if "Target" not in col]
-        # Drop rows where any of the predictor features are missing
         df = df.dropna(subset=predictor_cols)
         df = df.tail(lookback_weeks)
     
@@ -101,5 +104,5 @@ if __name__ == "__main__":
     save_latest_features(features_for_saving)
     
     display_features = build_features(for_training=True)
-    print("--- Feature DataFrame (Training Ready) ---")
+    print("\n--- Feature DataFrame (Training Ready) ---")
     print(display_features[["Target", "Target_12w"]].tail(15))
