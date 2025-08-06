@@ -16,42 +16,45 @@ from src.features import build_features
 def generate_forecast(forecast_date: str = None):
     """
     Loads features and models to generate a forecast for a specific date.
-    If no date is provided, it forecasts for the latest available date.
     """
     print("--- Generating Bitcoin Forecast ---")
 
-    # --- 1. Load Models and Features ---
+    # --- 1. Load Models and Full Historical Features ---
     models_dir = Path("artifacts/models")
-    features_df = build_features()
+    
+    # --- THIS IS THE FIX ---
+    # We must call build_features with for_training=False to get the full history
+    features_df = build_features(for_training=False)
+    # ---------------------
 
     if features_df.empty:
         print("❌ Error: Could not build features.")
         return
 
-    # --- THIS IS THE FINAL, CORRECTED DATE LOOKUP LOGIC ---
     if forecast_date:
         try:
             target_date = pd.to_datetime(forecast_date, utc=True)
-            # A robust way to find the closest index:
-            # 1. Calculate the absolute time difference for all dates.
             time_diffs = np.abs(features_df.index - target_date)
-            # 2. Find the index that corresponds to the minimum difference.
             closest_date_index = time_diffs.argmin()
-            # 3. Select the single row using iloc.
             latest_features = features_df.iloc[[closest_date_index]]
             print(f"✅ Found closest available data for forecast: {latest_features.index[0].strftime('%Y-%m-%d')}")
         except Exception as e:
             print(f"❌ Error processing date: {e}")
             return
     else:
-        latest_features = features_df.tail(1)
+        # If no date is given, we need to select the last row of the *training-ready* features
+        # to ensure it has no NaN values from the target calculation.
+        training_features = build_features(for_training=True)
+        latest_features = training_features.tail(1)
         print(f"✅ Generating forecast for the latest available week: {latest_features.index[0].strftime('%Y-%m-%d')}")
 
     classifier = joblib.load(models_dir / "direction_classifier.joblib")
     bayesian_model = joblib.load(models_dir / "level_forecaster_bayesian.joblib")
     xgboost_regressor = joblib.load(models_dir / "level_forecaster_xgboost.joblib")
     
-    X_latest = latest_features.drop(columns=['Target'])
+    # Align columns to ensure the model gets what it was trained on
+    training_cols = classifier.get_booster().feature_names
+    X_latest = latest_features[training_cols]
 
     # --- 2. Implement Liquidity Regime Filter ---
     features_df['Liquidity_Z'] = -features_df['dxy_z']
@@ -63,8 +66,14 @@ def generate_forecast(forecast_date: str = None):
         True, False
     )
     
-    current_regime_is_risk_on = features_df.loc[latest_features.index, 'Risk-On'].iloc[0]
-    regime_status = "Risk-On" if current_regime_is_risk_on else "Risk-Off"
+    # Handle potential NaN in rolling calculations for the selected date
+    if pd.isna(features_df.loc[latest_features.index, 'Risk-On'].iloc[0]):
+        regime_status = "Unknown (Insufficient Data)"
+        current_regime_is_risk_on = True # Default to Risk-On if regime cannot be calculated
+    else:
+        current_regime_is_risk_on = features_df.loc[latest_features.index, 'Risk-On'].iloc[0]
+        regime_status = "Risk-On" if current_regime_is_risk_on else "Risk-Off"
+    
     print(f"✅ Macro Regime detected: {regime_status}")
 
     # --- 3. Generate and Adjust Forecast ---
