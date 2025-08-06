@@ -3,7 +3,7 @@ import joblib
 from pathlib import Path
 import sys
 import numpy as np
-import argparse # Import argparse
+import argparse
 from datetime import datetime
 
 # --- Add project root to Python path ---
@@ -28,22 +28,18 @@ def generate_forecast(forecast_date: str = None):
         print("❌ Error: Could not build features.")
         return
 
-    # --- THIS IS THE NEW LOGIC ---
+    # --- THIS IS THE CORRECTED DATE LOOKUP LOGIC ---
     if forecast_date:
         try:
-            # Select the data for the specific week of the forecast date
             target_date = pd.to_datetime(forecast_date, utc=True)
-            # Find the feature row for the Monday of that week
-            latest_features = features_df.loc[features_df.index.to_period('W-MON') == target_date.to_period('W-MON')]
-            if latest_features.empty:
-                print(f"❌ Error: No data found for the week of {forecast_date}.")
-                return
-            print(f"✅ Generating forecast for the week of: {latest_features.index[0].strftime('%Y-%m-%d')}")
+            # Find the index of the row with the date closest to our target date
+            closest_date_index = features_df.index.get_loc(target_date, method='nearest')
+            latest_features = features_df.iloc[[closest_date_index]]
+            print(f"✅ Found closest available data for forecast: {latest_features.index[0].strftime('%Y-%m-%d')}")
         except Exception as e:
             print(f"❌ Error processing date: {e}")
             return
     else:
-        # Default to the latest available features
         latest_features = features_df.tail(1)
         print(f"✅ Generating forecast for the latest available week: {latest_features.index[0].strftime('%Y-%m-%d')}")
 
@@ -99,7 +95,7 @@ def generate_forecast(forecast_date: str = None):
 
     # --- 4. Assemble and Print Final Forecast ---
     forecast = {
-        "reference_week": X_latest.index[0].strftime('%Y-%m-%d'),
+        "reference_week": latest_features.index[0].strftime('%Y-%m-%d'),
         "last_known_price": f"${last_close_price:,.2f}",
         "macro_regime": regime_status,
         "directional_outlook": direction,
