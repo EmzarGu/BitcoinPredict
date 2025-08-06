@@ -40,12 +40,10 @@ def generate_forecast(forecast_date: str = None):
     X_latest = latest_features[training_cols]
     
     # --- 2. Calculate Historical Volatility ---
-    # We use the historical daily returns to get a realistic measure of volatility.
     daily_returns = features_df['close_usd'].pct_change()
-    # Calculate the annualized volatility and then scale it to our forecast horizons
     annual_volatility = daily_returns.std() * np.sqrt(365)
-    volatility_4w = annual_volatility / np.sqrt(52/4) # Scale to 4 weeks
-    volatility_12w = annual_volatility / np.sqrt(52/12) # Scale to 12 weeks
+    volatility_4w = annual_volatility / np.sqrt(52/4)
+    volatility_12w = annual_volatility / np.sqrt(52/12)
 
     # --- 3. Implement Liquidity Regime Filter ---
     features_df['Liquidity_Z'] = -features_df['dxy_z']
@@ -65,7 +63,6 @@ def generate_forecast(forecast_date: str = None):
     return_4w = price_target_4w_model.predict(X_latest)[0]
     price_target_4w = last_close_price * (1 + return_4w)
     
-    # Create the range based on the target and adjusted by probabilities
     lower_bound_4w = price_target_4w * (1 - volatility_4w * (1 + direction_probabilities[0] - direction_probabilities[2]))
     upper_bound_4w = price_target_4w * (1 + volatility_4w * (1 - direction_probabilities[0] + direction_probabilities[2]))
 
