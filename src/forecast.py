@@ -28,15 +28,17 @@ def generate_forecast(forecast_date: str = None):
         print("❌ Error: Could not build features.")
         return
 
-    # --- THIS IS THE CORRECTED DATE LOOKUP LOGIC ---
+    # --- THIS IS THE FINAL, CORRECTED DATE LOOKUP LOGIC ---
     if forecast_date:
         try:
             target_date = pd.to_datetime(forecast_date, utc=True)
-            # Calculate the absolute difference between the target date and all index dates
-            time_diff = (features_df.index - target_date).to_series().abs()
-            # Find the index of the row with the minimum time difference
-            closest_date_index = time_diff.idxmin()
-            latest_features = features_df.loc[[closest_date_index]]
+            # A robust way to find the closest index:
+            # 1. Calculate the absolute time difference for all dates.
+            time_diffs = np.abs(features_df.index - target_date)
+            # 2. Find the index that corresponds to the minimum difference.
+            closest_date_index = time_diffs.argmin()
+            # 3. Select the single row using iloc.
+            latest_features = features_df.iloc[[closest_date_index]]
             print(f"✅ Found closest available data for forecast: {latest_features.index[0].strftime('%Y-%m-%d')}")
         except Exception as e:
             print(f"❌ Error processing date: {e}")
