@@ -15,7 +15,7 @@ from src.features import build_features
 
 def generate_forecast(forecast_date: str = None):
     """
-    Generates a full 4-week and 12-week forecast using the new Quantile models.
+    Generates a full 4-week and 12-week forecast using Quantile Regression models.
     """
     print("--- Generating Full Bitcoin Forecast (with Quantile Ranges) ---")
 
@@ -77,13 +77,21 @@ def generate_forecast(forecast_date: str = None):
 
     # 4-Week Forecast
     price_target_4w = last_close_price * (1 + price_target_4w_model.predict(X_latest)[0])
-    lower_bound_4w = last_close_price * (1 + lower_bound_4w_model.predict(X_latest)[0])
-    upper_bound_4w = last_close_price * (1 + upper_bound_4w_model.predict(X_latest)[0])
+    raw_lower_4w = last_close_price * (1 + lower_bound_4w_model.predict(X_latest)[0])
+    raw_upper_4w = last_close_price * (1 + upper_bound_4w_model.predict(X_latest)[0])
 
     # 12-Week Forecast
     price_target_12w = last_close_price * (1 + price_target_12w_model.predict(X_latest)[0])
-    lower_bound_12w = last_close_price * (1 + lower_bound_12w_model.predict(X_latest)[0])
-    upper_bound_12w = last_close_price * (1 + upper_bound_12w_model.predict(X_latest)[0])
+    raw_lower_12w = last_close_price * (1 + lower_bound_12w_model.predict(X_latest)[0])
+    raw_upper_12w = last_close_price * (1 + upper_bound_12w_model.predict(X_latest)[0])
+
+    # --- THIS IS THE FIX: Sanity check the bounds ---
+    lower_bound_4w = min(raw_lower_4w, raw_upper_4w)
+    upper_bound_4w = max(raw_lower_4w, raw_upper_4w)
+    
+    lower_bound_12w = min(raw_lower_12w, raw_upper_12w)
+    upper_bound_12w = max(raw_lower_12w, raw_upper_12w)
+    # --------------------------------------------------
     
     # --- 4. Assemble and Print Final Forecast ---
     print("\n--- Final Forecast ---")
