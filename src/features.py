@@ -5,14 +5,9 @@ from typing import List
 
 import pandas as pd
 import psycopg2
-from dotenv import load_dotenv # Import the function
+from dotenv import load_dotenv
 
-# --- THIS IS THE FIX ---
-# Load environment variables from the .env file
-# This ensures DATABASE_URL is always available to the script.
 load_dotenv()
-# ---------------------
-
 logger = logging.getLogger(__name__)
 
 FEATURE_COLS: List[str] = [
@@ -50,8 +45,12 @@ def _load_btc_weekly() -> pd.DataFrame:
         logger.error("No data source found for btc_weekly")
         return pd.DataFrame()
 
-def build_features(lookback_weeks: int = 260) -> pd.DataFrame:
-    """Build feature dataframe from btc_weekly raw data."""
+def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.DataFrame:
+    """
+    Builds the feature dataframe.
+    - If for_training=True, it returns a limited lookback window.
+    - If for_training=False, it returns the full historical dataframe.
+    """
     df = _load_btc_weekly()
     if df.empty:
         return df
@@ -73,8 +72,13 @@ def build_features(lookback_weeks: int = 260) -> pd.DataFrame:
 
     df["Target"] = df["close_usd"].shift(-4) / df["close_usd"] - 1
 
-    df = df.dropna(subset=FEATURE_COLS)
-    df = df.tail(lookback_weeks)
+    # --- THIS IS THE CORRECTED LOGIC ---
+    # Only limit the lookback window if we are building features for training
+    if for_training:
+        df = df.dropna(subset=FEATURE_COLS)
+        df = df.tail(lookback_weeks)
+    # ------------------------------------
+    
     df = df.sort_index()
     return df
 
@@ -83,14 +87,19 @@ def save_latest_features(df: pd.DataFrame, path: str = "artifacts/features_lates
     if df.empty:
         logger.warning("No features to save")
         return
-    latest = df.tail(1)
+    # We must first build the features with the training flag to get the correct final row
+    latest_df_for_saving = build_features(for_training=True)
+    latest = latest_df_for_saving.tail(1)
     dest = Path(path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     latest.to_parquet(dest)
     logger.info("Saved latest features to %s", dest)
 
 if __name__ == "__main__":
-    features = build_features()
-    save_latest_features(features)
-    print("--- Feature DataFrame ---")
-    print(features.tail(3))
+    # When run directly, save the latest features for the forecasting script
+    features_for_saving = build_features(for_training=False) # Get full history first
+    save_latest_features(features_for_saving)
+    # For display, show the last 3 rows of the training-ready features
+    display_features = build_features(for_training=True)
+    print("--- Feature DataFrame (Training Ready) ---")
+    print(display_features.tail(3))
