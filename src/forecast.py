@@ -15,17 +15,13 @@ from src.features import build_features
 
 def generate_forecast(forecast_date: str = None):
     """
-    Loads features and models to generate a forecast for a specific date.
+    Loads features and models to generate a full 4-week and 12-week forecast.
     """
-    print("--- Generating Bitcoin Forecast ---")
+    print("--- Generating Full Bitcoin Forecast (4-week & 12-week) ---")
 
-    # --- 1. Load Models and Full Historical Features ---
+    # --- 1. Load All Models and Features ---
     models_dir = Path("artifacts/models")
-    
-    # --- THIS IS THE FIX ---
-    # We must call build_features with for_training=False to get the full history
     features_df = build_features(for_training=False)
-    # ---------------------
 
     if features_df.empty:
         print("❌ Error: Could not build features.")
@@ -42,17 +38,17 @@ def generate_forecast(forecast_date: str = None):
             print(f"❌ Error processing date: {e}")
             return
     else:
-        # If no date is given, we need to select the last row of the *training-ready* features
-        # to ensure it has no NaN values from the target calculation.
         training_features = build_features(for_training=True)
         latest_features = training_features.tail(1)
         print(f"✅ Generating forecast for the latest available week: {latest_features.index[0].strftime('%Y-%m-%d')}")
 
+    # Load all 5 models
     classifier = joblib.load(models_dir / "direction_classifier.joblib")
-    bayesian_model = joblib.load(models_dir / "level_forecaster_bayesian.joblib")
-    xgboost_regressor = joblib.load(models_dir / "level_forecaster_xgboost.joblib")
+    bayesian_4w = joblib.load(models_dir / "level_forecaster_bayesian_4w.joblib")
+    xgboost_4w = joblib.load(models_dir / "level_forecaster_xgboost_4w.joblib")
+    bayesian_12w = joblib.load(models_dir / "level_forecaster_bayesian_12w.joblib")
+    xgboost_12w = joblib.load(models_dir / "level_forecaster_xgboost_12w.joblib")
     
-    # Align columns to ensure the model gets what it was trained on
     training_cols = classifier.get_booster().feature_names
     X_latest = latest_features[training_cols]
 
@@ -60,23 +56,18 @@ def generate_forecast(forecast_date: str = None):
     features_df['Liquidity_Z'] = -features_df['dxy_z']
     features_df['DXY_26w_MA'] = features_df['dxy'].rolling(window=26).mean()
     features_df['DXY_26w_trend'] = features_df['dxy'] / features_df['DXY_26w_MA']
+    features_df['Risk-On'] = np.where((features_df['Liquidity_Z'] > 0) & (features_df['DXY_26w_trend'] < 1), True, False)
     
-    features_df['Risk-On'] = np.where(
-        (features_df['Liquidity_Z'] > 0) & (features_df['DXY_26w_trend'] < 1),
-        True, False
-    )
-    
-    # Handle potential NaN in rolling calculations for the selected date
     if pd.isna(features_df.loc[latest_features.index, 'Risk-On'].iloc[0]):
         regime_status = "Unknown (Insufficient Data)"
-        current_regime_is_risk_on = True # Default to Risk-On if regime cannot be calculated
+        current_regime_is_risk_on = True
     else:
         current_regime_is_risk_on = features_df.loc[latest_features.index, 'Risk-On'].iloc[0]
         regime_status = "Risk-On" if current_regime_is_risk_on else "Risk-Off"
     
     print(f"✅ Macro Regime detected: {regime_status}")
 
-    # --- 3. Generate and Adjust Forecast ---
+    # --- 3. Generate 4-Week Forecast ---
     direction_probabilities = classifier.predict_proba(X_latest)[0]
     
     if not current_regime_is_risk_on:
@@ -87,43 +78,38 @@ def generate_forecast(forecast_date: str = None):
         direction_probabilities[1] += reduction
     
     direction_map = {0: "Bearish", 1: "Neutral", 2: "Bullish"}
-    predicted_class_index = np.argmax(direction_probabilities)
-    direction = direction_map[predicted_class_index]
+    direction = direction_map[np.argmax(direction_probabilities)]
 
-    bayesian_pred, std_dev = bayesian_model.predict(X_latest, return_std=True)
-    bayesian_pred = bayesian_pred[0]
-    std_dev = std_dev[0]
-    xgboost_pred = xgboost_regressor.predict(X_latest)[0]
-    
-    blended_return = (bayesian_pred + xgboost_pred) / 2
+    bayesian_pred_4w, std_dev_4w = bayesian_4w.predict(X_latest, return_std=True)
+    xgboost_pred_4w = xgboost_4w.predict(X_latest)[0]
+    blended_return_4w = (bayesian_pred_4w[0] + xgboost_pred_4w) / 2
     last_close_price = X_latest['close_usd'].iloc[0]
-    price_target = last_close_price * (1 + blended_return)
+    price_target_4w = last_close_price * (1 + blended_return_4w)
 
-    lower_bound_return = blended_return - (0.84 * std_dev)
-    upper_bound_return = blended_return + (0.84 * std_dev)
-    price_range = [
-        last_close_price * (1 + lower_bound_return),
-        last_close_price * (1 + upper_bound_return)
-    ]
+    lower_bound_4w = last_close_price * (1 + (blended_return_4w - (0.84 * std_dev_4w[0])))
+    upper_bound_4w = last_close_price * (1 + (blended_return_4w + (0.84 * std_dev_4w[0])))
 
-    # --- 4. Assemble and Print Final Forecast ---
-    forecast = {
-        "reference_week": latest_features.index[0].strftime('%Y-%m-%d'),
-        "last_known_price": f"${last_close_price:,.2f}",
-        "macro_regime": regime_status,
-        "directional_outlook": direction,
-        "probabilities": {
-            "Bearish": f"{direction_probabilities[0]:.2%}",
-            "Neutral": f"{direction_probabilities[1]:.2%}",
-            "Bullish": f"{direction_probabilities[2]:.2%}"
-        },
-        "4_week_price_target": f"${price_target:,.2f}",
-        "4_week_likely_range": f"${price_range[0]:,.2f} - ${price_range[1]:,.2f}"
-    }
+    # --- 4. Generate 12-Week Forecast ---
+    bayesian_pred_12w, std_dev_12w = bayesian_12w.predict(X_latest, return_std=True)
+    xgboost_pred_12w = xgboost_12w.predict(X_latest)[0]
+    blended_return_12w = (bayesian_pred_12w[0] + xgboost_pred_12w) / 2
+    price_target_12w = last_close_price * (1 + blended_return_12w)
 
+    lower_bound_12w = last_close_price * (1 + (blended_return_12w - (0.84 * std_dev_12w[0])))
+    upper_bound_12w = last_close_price * (1 + (blended_return_12w + (0.84 * std_dev_12w[0])))
+
+    # --- 5. Assemble and Print Final Forecast ---
     print("\n--- Final Forecast ---")
-    for key, value in forecast.items():
-        print(f"{key.replace('_', ' ').title()}: {value}")
+    print(f"Reference Week: {latest_features.index[0].strftime('%Y-%m-%d')}")
+    print(f"Last Known Price: ${last_close_price:,.2f}")
+    print(f"Macro Regime: {regime_status}")
+    print(f"Directional Outlook: {direction} (Probabilities: Bearish {direction_probabilities[0]:.2%}, Neutral {direction_probabilities[1]:.2%}, Bullish {direction_probabilities[2]:.2%})")
+    print("\n--- 4-Week Outlook ---")
+    print(f"Price Target: ${price_target_4w:,.2f}")
+    print(f"Likely Range: ${lower_bound_4w:,.2f} - ${upper_bound_4w:,.2f}")
+    print("\n--- 12-Week Outlook ---")
+    print(f"Price Target: ${price_target_12w:,.2f}")
+    print(f"Likely Range: ${lower_bound_12w:,.2f} - ${upper_bound_12w:,.2f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate a Bitcoin forecast for a specific date.')
