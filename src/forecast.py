@@ -42,7 +42,6 @@ def generate_forecast(forecast_date: str = None):
         latest_features = training_features.tail(1)
         print(f"✅ Generating forecast for the latest available week: {latest_features.index[0].strftime('%Y-%m-%d')}")
 
-    # Load all 5 models
     classifier = joblib.load(models_dir / "direction_classifier.joblib")
     bayesian_4w = joblib.load(models_dir / "level_forecaster_bayesian_4w.joblib")
     xgboost_4w = joblib.load(models_dir / "level_forecaster_xgboost_4w.joblib")
@@ -88,7 +87,7 @@ def generate_forecast(forecast_date: str = None):
 
     lower_bound_4w = last_close_price * (1 + (blended_return_4w - (0.84 * std_dev_4w[0])))
     upper_bound_4w = last_close_price * (1 + (blended_return_4w + (0.84 * std_dev_4w[0])))
-
+    
     # --- 4. Generate 12-Week Forecast ---
     bayesian_pred_12w, std_dev_12w = bayesian_12w.predict(X_latest, return_std=True)
     xgboost_pred_12w = xgboost_12w.predict(X_latest)[0]
@@ -97,6 +96,11 @@ def generate_forecast(forecast_date: str = None):
 
     lower_bound_12w = last_close_price * (1 + (blended_return_12w - (0.84 * std_dev_12w[0])))
     upper_bound_12w = last_close_price * (1 + (blended_return_12w + (0.84 * std_dev_12w[0])))
+
+    # --- THIS IS THE FIX: Ensure the price floor is $0 ---
+    lower_bound_4w = max(0, lower_bound_4w)
+    lower_bound_12w = max(0, lower_bound_12w)
+    # --------------------------------------------------
 
     # --- 5. Assemble and Print Final Forecast ---
     print("\n--- Final Forecast ---")
