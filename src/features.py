@@ -73,14 +73,12 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     df["Target"] = df["close_usd"].shift(-4) / df["close_usd"] - 1
     df["Target_12w"] = df["close_usd"].shift(-12) / df["close_usd"] - 1
 
-    # --- THIS IS THE CORRECTED LOGIC ---
     if for_training:
-        # Define the columns that are used as predictors (i.e., not the targets)
+        # Define predictor columns (all features except the targets)
         predictor_cols = [col for col in FEATURE_COLS if "Target" not in col]
         # Drop rows where any of the predictor features are missing
         df = df.dropna(subset=predictor_cols)
         df = df.tail(lookback_weeks)
-    # ------------------------------------
     
     df = df.sort_index()
     return df
