@@ -10,8 +10,6 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# --- THIS IS THE MODIFIED PART (Part 1) ---
-# Add the new 12-week target to our list of feature columns
 FEATURE_COLS: List[str] = [
     "Momentum_4w", "Momentum_12w", "Momentum_26w", "Realised_Price_Delta",
     "nupl", "dxy_z", "ust10_z", "gold_price_z", "spx_index_z",
@@ -72,15 +70,17 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     
     df["DXY_Invert"] = 1 / df["dxy"]
 
-    # --- THIS IS THE MODIFIED PART (Part 2) ---
-    # Calculate the 4-week and the new 12-week target variables
     df["Target"] = df["close_usd"].shift(-4) / df["close_usd"] - 1
     df["Target_12w"] = df["close_usd"].shift(-12) / df["close_usd"] - 1
-    # ----------------------------------------
 
+    # --- THIS IS THE CORRECTED LOGIC ---
     if for_training:
-        df = df.dropna(subset=FEATURE_COLS)
+        # Define the columns that are used as predictors (i.e., not the targets)
+        predictor_cols = [col for col in FEATURE_COLS if "Target" not in col]
+        # Drop rows where any of the predictor features are missing
+        df = df.dropna(subset=predictor_cols)
         df = df.tail(lookback_weeks)
+    # ------------------------------------
     
     df = df.sort_index()
     return df
@@ -104,4 +104,4 @@ if __name__ == "__main__":
     
     display_features = build_features(for_training=True)
     print("--- Feature DataFrame (Training Ready) ---")
-    print(display_features.tail(3))
+    print(display_features[["Target", "Target_12w"]].tail(15))
