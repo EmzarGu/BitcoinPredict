@@ -51,11 +51,6 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     - If for_training=True, it returns a limited lookback window.
     - If for_training=False, it returns the full historical dataframe.
     """
-    # --- DEBUG PRINTS START HERE ---
-    print(f"\n--- DEBUG (features.py): Running build_features ---")
-    print(f"--- DEBUG (features.py): 'for_training' flag is set to: {for_training} ---")
-    # ------------------------------------
-
     df = _load_btc_weekly()
     if df.empty:
         return df
@@ -76,19 +71,11 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     df["DXY_Invert"] = 1 / df["dxy"]
 
     df["Target"] = df["close_usd"].shift(-4) / df["close_usd"] - 1
-    
-    # --- DEBUG PRINTS ---
-    print(f"--- DEBUG (features.py): Shape before final processing: {df.shape} ---")
-    
+
+    # Only limit the lookback window if we are building features for training
     if for_training:
-        print("--- DEBUG (features.py): Applying training lookback window... ---")
         df = df.dropna(subset=FEATURE_COLS)
         df = df.tail(lookback_weeks)
-    else:
-        print("--- DEBUG (features.py): Skipping training lookback, returning full history. ---")
-
-    print(f"--- DEBUG (features.py): Final shape being returned: {df.shape} ---")
-    # ------------------
     
     df = df.sort_index()
     return df
@@ -111,5 +98,5 @@ if __name__ == "__main__":
     save_latest_features(features_for_saving)
     
     display_features = build_features(for_training=True)
-    print("\n--- Feature DataFrame (Training Ready) ---")
+    print("--- Feature DataFrame (Training Ready) ---")
     print(display_features.tail(3))
