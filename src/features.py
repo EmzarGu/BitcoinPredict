@@ -51,11 +51,6 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     - If for_training=True, it returns a limited lookback window.
     - If for_training=False, it returns the full historical dataframe.
     """
-    # --- DEBUG PRINTS START HERE ---
-    print("\n--- DEBUG (features.py): Running build_features ---")
-    print(f"--- DEBUG (features.py): 'for_training' flag is set to: {for_training} ---")
-    # ------------------------------------
-
     df = _load_btc_weekly()
     if df.empty:
         return df
@@ -77,7 +72,7 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
 
     df["Target"] = df["close_usd"].shift(-4) / df["close_usd"] - 1
     df["Target_12w"] = df["close_usd"].shift(-12) / df["close_usd"] - 1
-    
+
     if for_training:
         predictor_cols = [col for col in FEATURE_COLS if "Target" not in col]
         df = df.dropna(subset=predictor_cols)
@@ -85,24 +80,3 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     
     df = df.sort_index()
     return df
-
-def save_latest_features(df: pd.DataFrame, path: str = "artifacts/features_latest.parquet") -> None:
-    """Save the most recent feature row to a parquet file."""
-    if df.empty:
-        logger.warning("No features to save")
-        return
-    
-    latest_df_for_saving = build_features(for_training=True)
-    latest = latest_df_for_saving.tail(1)
-    dest = Path(path)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    latest.to_parquet(dest)
-    logger.info("Saved latest features to %s", dest)
-
-if __name__ == "__main__":
-    features_for_saving = build_features(for_training=False)
-    save_latest_features(features_for_saving)
-    
-    display_features = build_features(for_training=True)
-    print("\n--- Feature DataFrame (Training Ready) ---")
-    print(display_features[["Target", "Target_12w"]].tail(15))
