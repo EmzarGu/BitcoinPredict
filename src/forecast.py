@@ -32,9 +32,11 @@ def generate_forecast(forecast_date: str = None):
     if forecast_date:
         try:
             target_date = pd.to_datetime(forecast_date, utc=True)
-            # Find the index of the row with the date closest to our target date
-            closest_date_index = features_df.index.get_loc(target_date, method='nearest')
-            latest_features = features_df.iloc[[closest_date_index]]
+            # Calculate the absolute difference between the target date and all index dates
+            time_diff = (features_df.index - target_date).to_series().abs()
+            # Find the index of the row with the minimum time difference
+            closest_date_index = time_diff.idxmin()
+            latest_features = features_df.loc[[closest_date_index]]
             print(f"✅ Found closest available data for forecast: {latest_features.index[0].strftime('%Y-%m-%d')}")
         except Exception as e:
             print(f"❌ Error processing date: {e}")
