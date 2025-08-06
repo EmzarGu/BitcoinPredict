@@ -12,15 +12,15 @@ if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
     
 from src.features import build_features
+from sklearn.model_selection import train_test_split
 
 def generate_forecast(forecast_date: str = None):
     """
-    Generates a full, unified, and logically consistent 4-week and 12-week forecast
-    using a smart ensemble with Quantile Regression for the ranges.
+    Generates a full, unified, and logically consistent 4-week and 12-week forecast.
     """
-    print("--- Generating Final Unified Bitcoin Forecast ---")
+    print("--- Generating Unified Bitcoin Forecast ---")
 
-    # --- 1. Load All Models and Features ---
+    # --- 1. Load Data and Models ---
     models_dir = Path("artifacts/models")
     features_df = build_features(for_training=False)
 
@@ -32,19 +32,23 @@ def generate_forecast(forecast_date: str = None):
         training_features = build_features(for_training=True)
         latest_features = training_features.tail(1)
 
-    # Load all 7 models
     classifier = joblib.load(models_dir / "direction_classifier.joblib")
     price_target_4w_model = joblib.load(models_dir / "price_target_4w.joblib")
-    lower_bound_4w_model = joblib.load(models_dir / "lower_bound_4w.joblib")
-    upper_bound_4w_model = joblib.load(models_dir / "upper_bound_4w.joblib")
     price_target_12w_model = joblib.load(models_dir / "price_target_12w.joblib")
-    lower_bound_12w_model = joblib.load(models_dir / "lower_bound_12w.joblib")
-    upper_bound_12w_model = joblib.load(models_dir / "upper_bound_12w.joblib")
     
     training_cols = classifier.get_booster().feature_names
     X_latest = latest_features[training_cols]
     
-    # --- 2. Implement Liquidity Regime Filter ---
+    # --- 2. Calculate Historical Errors for Meaningful Ranges ---
+    y_4w_df = features_df[['Target']].dropna()
+    X_4w = features_df.loc[y_4w_df.index][training_cols]
+    errors_4w = y_4w_df['Target'] - price_target_4w_model.predict(X_4w)
+    
+    y_12w_df = features_df[['Target_12w']].dropna()
+    X_12w = features_df.loc[y_12w_df.index][training_cols]
+    errors_12w = y_12w_df['Target_12w'] - price_target_12w_model.predict(X_12w)
+
+    # --- 3. Implement Liquidity Regime Filter ---
     features_df['Liquidity_Z'] = -features_df['dxy_z']
     features_df['DXY_26w_MA'] = features_df['dxy'].rolling(window=26).mean()
     features_df['DXY_26w_trend'] = features_df['dxy'] / features_df['DXY_26w_MA']
@@ -52,31 +56,28 @@ def generate_forecast(forecast_date: str = None):
     
     regime_status = "Risk-On" if features_df.loc[latest_features.index, 'Risk-On'].iloc[0] else "Risk-Off"
     
-    # --- 3. Generate the "Smart" Ensemble Forecast ---
+    # --- 4. Generate the "Smart" Ensemble Forecast ---
     direction_probabilities = classifier.predict_proba(X_latest)[0]
     direction = ["Bearish", "Neutral", "Bullish"][np.argmax(direction_probabilities)]
 
     last_close_price = X_latest['close_usd'].iloc[0]
 
     # 4-Week Forecast
-    price_target_4w = last_close_price * (1 + price_target_4w_model.predict(X_latest)[0])
-    raw_lower_4w = last_close_price * (1 + lower_bound_4w_model.predict(X_latest)[0])
-    raw_upper_4w = last_close_price * (1 + upper_bound_4w_model.predict(X_latest)[0])
+    return_4w = price_target_4w_model.predict(X_latest)[0]
+    price_target_4w = last_close_price * (1 + return_4w)
+    # The range is the target +/- the 80th percentile of historical errors
+    range_modifier_4w = np.percentile(np.abs(errors_4w), 80)
+    lower_bound_4w = price_target_4w * (1 - range_modifier_4w)
+    upper_bound_4w = price_target_4w * (1 + range_modifier_4w)
 
     # 12-Week Forecast
-    price_target_12w = last_close_price * (1 + price_target_12w_model.predict(X_latest)[0])
-    raw_lower_12w = last_close_price * (1 + lower_bound_12w_model.predict(X_latest)[0])
-    raw_upper_12w = last_close_price * (1 + upper_bound_12w_model.predict(X_latest)[0])
+    return_12w = price_target_12w_model.predict(X_latest)[0]
+    price_target_12w = last_close_price * (1 + return_12w)
+    range_modifier_12w = np.percentile(np.abs(errors_12w), 80)
+    lower_bound_12w = price_target_12w * (1 - range_modifier_12w)
+    upper_bound_12w = price_target_12w * (1 + range_modifier_12w)
     
-    # --- THIS IS THE FIX: Sanity check the bounds to prevent quantile crossing ---
-    lower_bound_4w = min(raw_lower_4w, raw_upper_4w)
-    upper_bound_4w = max(raw_lower_4w, raw_upper_4w)
-    
-    lower_bound_12w = min(raw_lower_12w, raw_upper_12w)
-    upper_bound_12w = max(raw_lower_12w, raw_upper_12w)
-    # --------------------------------------------------------------------------
-
-    # --- 4. Assemble and Print Final Forecast ---
+    # --- 5. Assemble and Print Final Forecast ---
     print("\n--- Final, Unified Forecast ---")
     print(f"Reference Week: {latest_features.index[0].strftime('%Y-%m-%d')}")
     print(f"Last Known Price: ${last_close_price:,.2f}")
