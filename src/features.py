@@ -114,12 +114,15 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     existing_cols = [col for col in final_cols if col in df.columns]
     df = df[existing_cols]
 
-    # **THIS IS THE FIX**: Drop all rows with any NaN values after features are created.
-    # This ensures that any data passed to the models is clean.
-    df.dropna(inplace=True)
-
+    # **THIS IS THE FIX**: Apply NaN dropping conditionally.
     if for_training:
+        # For training, we need complete rows with no NaNs in any column.
+        df.dropna(inplace=True)
         df = df.tail(lookback_weeks)
+    else:
+        # For forecasting, we only need the predictors to be non-NaN.
+        # This keeps the most recent rows where only Targets are NaN.
+        df.dropna(subset=PREDICTOR_COLS, inplace=True)
 
     df = df.sort_index()
     return df
