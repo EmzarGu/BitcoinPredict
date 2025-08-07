@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# --- Add the new LGC_distance_z feature ---
+# --- CHANGE 1: Use the new standardized feature in the master list ---
 FEATURE_COLS: List[str] = [
     "Momentum_4w", "Momentum_12w", "Momentum_26w", "Realised_Price_Delta",
     "nupl", "dxy_z", "ust10_z", "gold_price_z", "spx_index_z",
@@ -66,10 +66,9 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
         df['lgc'] = np.exp(log_growth_curve(np.arange(1, len(df) + 1), *params))
         df['LGC_distance'] = (df['close_usd'] / df['lgc']) - 1
         
-        # --- THIS IS THE FIX: Standardize the LGC feature ---
+        # --- CHANGE 2: Add the z-score calculation ---
         rolling_lgc = df['LGC_distance'].rolling(window=52)
         df['LGC_distance_z'] = (df['LGC_distance'] - rolling_lgc.mean()) / rolling_lgc.std()
-        # ---------------------------------------------------
 
     except Exception as e:
         logger.warning(f"Could not fit LGC: {e}")
