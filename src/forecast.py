@@ -17,7 +17,7 @@ from src.train import create_sequences
 
 def generate_forecast(forecast_date: str = None):
     """
-    Generates a final, unified forecast using the binary classifier.
+    Generates a final, unified forecast using the complete hybrid model suite.
     """
     print("--- Generating Unified Bitcoin Forecast ---")
 
@@ -26,46 +26,46 @@ def generate_forecast(forecast_date: str = None):
     features_df = build_features(for_training=False)
 
     if features_df.empty:
-        print("❌ Could not build features for forecasting. Aborting.")
+        print("❌ Could not build features. Aborting.")
         return
 
     try:
         classifier = joblib.load(models_dir / "direction_classifier_binary_final.joblib")
-        price_reg_4w = load_model(models_dir / "price_target_regressor_final.h5")
+        price_reg_4w = load_model(models_dir / "price_target_4w_final.h5")
+        price_reg_12w = joblib.load(models_dir / "price_target_12w_final.joblib")
         scaler_cls = joblib.load(models_dir / "scaler_classifier_final.joblib")
-        scaler_reg = joblib.load(models_dir / "scaler_regressor_final.joblib")
+        scaler_reg_4w = joblib.load(models_dir / "scaler_regressor_4w_final.joblib")
+        scaler_reg_12w = joblib.load(models_dir / "scaler_regressor_12w_final.joblib")
     except Exception as e:
         print(f"❌ A model or scaler could not be loaded: {e}. Please run train.py first.")
         return
 
     # --- 2. Get Latest Features ---
-    high_importance_features = [
-        'Liquidity_Z', 'LGC_distance_z',
-        'SMA_ratio_52w', 'Realised_to_Spot'
-    ]
-    PREDICTOR_COLS = list(set(features_df.columns) - {'Target', 'Target_12w', 'close_usd'})
+    high_importance_features = ['Liquidity_Z', 'LGC_distance_z', 'SMA_ratio_52w', 'Realised_to_Spot']
+    all_predictors = list(set(features_df.columns) - {'Target', 'Target_12w', 'close_usd'})
 
     if forecast_date:
         ref_date = pd.to_datetime(forecast_date, utc=True)
         try:
-            nearest_date_index = features_df.index.get_indexer([ref_date], method='nearest')[0]
-            ref_date = features_df.index[nearest_date_index]
-            latest_features_for_lstm = features_df.iloc[max(0, nearest_date_index - 3):nearest_date_index + 1]
-            latest_features_flat = features_df.iloc[[nearest_date_index]]
+            idx = features_df.index.get_indexer([ref_date], method='nearest')[0]
+            ref_date = features_df.index[idx]
+            latest_for_lstm = features_df.iloc[max(0, idx - 3):idx + 1]
+            latest_flat = features_df.iloc[[idx]]
         except Exception:
-             print(f"❌ Could not find data for forecast date {forecast_date}.")
-             return
+            print(f"❌ Could not find data for forecast date {forecast_date}.")
+            return
     else:
-        latest_features_for_lstm = features_df.tail(4)
-        latest_features_flat = features_df.tail(1)
-        ref_date = latest_features_flat.index[0]
+        latest_for_lstm = features_df.tail(4)
+        latest_flat = features_df.tail(1)
+        ref_date = latest_flat.index[0]
         
-    last_close_price = latest_features_flat['close_usd'].iloc[0]
+    last_close_price = latest_flat['close_usd'].iloc[0]
 
     # --- 3. Prepare Data for Prediction ---
-    X_cls_scaled = scaler_cls.transform(latest_features_flat[high_importance_features])
-    X_reg_scaled_lstm = scaler_reg.transform(latest_features_for_lstm[PREDICTOR_COLS])
-    X_latest_seq = np.array([X_reg_scaled_lstm])
+    X_cls_scaled = scaler_cls.transform(latest_flat[high_importance_features])
+    X_reg_4w_scaled = scaler_reg_4w.transform(latest_for_lstm[all_predictors])
+    X_latest_seq = np.array([X_reg_4w_scaled])
+    X_reg_12w_scaled = scaler_reg_12w.transform(latest_flat[all_predictors])
     
     # --- 4. Generate Forecasts ---
     direction_pred = classifier.predict(X_cls_scaled)[0]
@@ -77,6 +77,9 @@ def generate_forecast(forecast_date: str = None):
     return_4w = price_reg_4w.predict(X_latest_seq, verbose=0)[0][0]
     price_target_4w = last_close_price * (1 + return_4w)
     
+    return_12w = price_reg_12w.predict(X_reg_12w_scaled)[0]
+    price_target_12w = last_close_price * (1 + return_12w)
+    
     # --- 5. Assemble and Print Final Forecast ---
     print("\n--- Final, Unified Forecast ---")
     print(f"Reference Week: {ref_date.strftime('%Y-%m-%d')}")
@@ -86,6 +89,10 @@ def generate_forecast(forecast_date: str = None):
     print(f"\n--- 4-Week Outlook (for {date_4w.strftime('%Y-%m-%d')}) ---")
     print(f"Directional Signal: {directional_outlook} (Confidence: {confidence:.2%})")
     print(f"Price Target (LSTM): ${price_target_4w:,.2f}")
+    
+    date_12w = ref_date + timedelta(weeks=12)
+    print(f"\n--- 12-Week Outlook (for {date_12w.strftime('%Y-%m-%d')}) ---")
+    print(f"Price Target (Lasso): ${price_target_12w:,.2f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate a Bitcoin forecast for a specific date.')
