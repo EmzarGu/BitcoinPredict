@@ -4,20 +4,23 @@ from pathlib import Path
 from typing import List
 
 import pandas as pd
+import numpy as np
+from scipy.optimize import curve_fit
 import psycopg2
 from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+# --- Add the new LGC_distance feature ---
 FEATURE_COLS: List[str] = [
     "Momentum_4w", "Momentum_12w", "Momentum_26w", "Realised_Price_Delta",
     "nupl", "dxy_z", "ust10_z", "gold_price_z", "spx_index_z",
-    "DXY_Invert", "Target", "Target_12w"
+    "DXY_Invert", "LGC_distance", "Target", "Target_12w"
 ]
 
 def _load_btc_weekly() -> pd.DataFrame:
-    """Load btc_weekly data from the database or CSV fallback."""
+    # ... (function is unchanged)
     db_url = os.getenv("DATABASE_URL")
     if db_url:
         try:
@@ -46,11 +49,6 @@ def _load_btc_weekly() -> pd.DataFrame:
         return pd.DataFrame()
 
 def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.DataFrame:
-    """
-    Builds the feature dataframe.
-    - If for_training=True, it returns a limited lookback window.
-    - If for_training=False, it returns the full historical dataframe.
-    """
     df = _load_btc_weekly()
     if df.empty:
         return df
@@ -58,6 +56,25 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     df = df.set_index("week_start")
     df = df.sort_index()
 
+    # --- THIS IS THE NEW LGC CALCULATION ---
+    # Ensure there are no zero or negative prices before taking the log
+    df_for_lgc = df[df['close_usd'] > 0].copy()
+    
+    def log_growth_curve(x, a, b):
+        return a + b * np.log(x)
+
+    x_data = np.arange(1, len(df_for_lgc) + 1)
+    y_data = np.log(df_for_lgc['close_usd'])
+
+    try:
+        params, _ = curve_fit(log_growth_curve, x_data, y_data)
+        df['lgc'] = np.exp(log_growth_curve(np.arange(1, len(df) + 1), *params))
+        df['LGC_distance'] = (df['close_usd'] / df['lgc']) - 1
+    except Exception as e:
+        logger.warning(f"Could not fit LGC: {e}")
+        df['LGC_distance'] = 0 # Default to zero if the curve fails
+    # ----------------------------------------
+    
     df["Momentum_4w"] = df["close_usd"].pct_change(4)
     df["Momentum_12w"] = df["close_usd"].pct_change(12)
     df["Momentum_26w"] = df["close_usd"].pct_change(26)
