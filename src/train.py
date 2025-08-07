@@ -41,7 +41,8 @@ def train_all_models():
 
     # --- 2. Define Feature Sets and Prepare Data ---
     high_importance_features = ['Liquidity_Z', 'LGC_distance_z', 'SMA_ratio_52w', 'Realised_to_Spot']
-    all_predictors = list(set(features_df.columns) - {'Target', 'Target_12w', 'close_usd'})
+    # **THIS IS THE FIX**: Sort the column names to ensure consistent order
+    all_predictors = sorted(list(set(features_df.columns) - {'Target', 'Target_12w', 'close_usd'}))
     
     # --- 3. Train Binary Directional Classifier ---
     print("\n--- Training Binary Directional Classifier ---")
@@ -75,7 +76,6 @@ def train_all_models():
     X_train_seq, y_train_seq = create_sequences(X_train_4w, y_train_4w, time_steps)
     X_test_seq, y_test_seq = create_sequences(X_test_4w, y_test_4w, time_steps)
 
-    # **THIS IS THE FIX**: Replaced the placeholder with the full LSTM architecture
     lstm_model = Sequential([
         LSTM(50, return_sequences=True, input_shape=(X_train_seq.shape[1], X_train_seq.shape[2])),
         Dropout(0.2),
@@ -114,9 +114,9 @@ def train_all_models():
     models_dir = Path("artifacts/models")
     models_dir.mkdir(parents=True, exist_ok=True)
     
-    joblib.dump(classifier, models_dir / "direction_classifier_binary_final.joblib")
+    joblib.dump(classifier.fit(X_scaled_cls, y_binary), models_dir / "direction_classifier_binary_final.joblib")
     lstm_model.save(models_dir / "price_target_4w_final.h5")
-    joblib.dump(lasso_model_12w, models_dir / "price_target_12w_final.joblib")
+    joblib.dump(lasso_model_12w.fit(X_scaled_reg_12w, y_reg_12w), models_dir / "price_target_12w_final.joblib")
     
     joblib.dump(scaler_cls, models_dir / "scaler_classifier_final.joblib")
     joblib.dump(scaler_reg_4w, models_dir / "scaler_regressor_4w_final.joblib")
