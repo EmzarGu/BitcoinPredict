@@ -80,7 +80,21 @@ def generate_forecast(forecast_date: str = None):
     return_12w = price_reg_12w.predict(X_reg_12w_scaled)[0]
     price_target_12w = last_close_price * (1 + return_12w)
     
-    # --- 5. Assemble and Print Final Forecast ---
+    # --- 5. Calculate Forecast Ranges (Restored) ---
+    y_4w_full = features_df['Target'].dropna()
+    X_4w_full_scaled = scaler_reg_4w.transform(features_df.loc[y_4w_full.index][all_predictors])
+    X_seq_full, y_seq_full = create_sequences(pd.DataFrame(X_4w_full_scaled, index=y_4w_full.index), y_4w_full)
+    preds_4w = price_reg_4w.predict(X_seq_full, verbose=0).flatten()
+    errors_4w = y_seq_full - preds_4w
+    range_mod_4w = np.percentile(np.abs(errors_4w), 80)
+    
+    y_12w_full = features_df['Target_12w'].dropna()
+    X_12w_full_scaled = scaler_reg_12w.transform(features_df.loc[y_12w_full.index][all_predictors])
+    preds_12w = price_reg_12w.predict(X_12w_full_scaled)
+    errors_12w = y_12w_full - preds_12w
+    range_mod_12w = np.percentile(np.abs(errors_12w), 80)
+
+    # --- 6. Assemble and Print Final Forecast ---
     print("\n--- Final, Unified Forecast ---")
     print(f"Reference Week: {ref_date.strftime('%Y-%m-%d')}")
     print(f"Last Known Price: ${last_close_price:,.2f}")
@@ -89,10 +103,12 @@ def generate_forecast(forecast_date: str = None):
     print(f"\n--- 4-Week Outlook (for {date_4w.strftime('%Y-%m-%d')}) ---")
     print(f"Directional Signal: {directional_outlook} (Confidence: {confidence:.2%})")
     print(f"Price Target (LSTM): ${price_target_4w:,.2f}")
+    print(f"Likely Range (80% confidence): ${price_target_4w * (1 - range_mod_4w):,.2f} - ${price_target_4w * (1 + range_mod_4w):,.2f}")
     
     date_12w = ref_date + timedelta(weeks=12)
     print(f"\n--- 12-Week Outlook (for {date_12w.strftime('%Y-%m-%d')}) ---")
     print(f"Price Target (Lasso): ${price_target_12w:,.2f}")
+    print(f"Likely Range (80% confidence): ${price_target_12w * (1 - range_mod_12w):,.2f} - ${price_target_12w * (1 + range_mod_12w):,.2f}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Generate a Bitcoin forecast for a specific date.')
