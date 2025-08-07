@@ -42,7 +42,6 @@ def generate_forecast(forecast_date: str = None):
 
     # --- 2. Get Latest Features ---
     high_importance_features = ['Liquidity_Z', 'LGC_distance_z', 'SMA_ratio_52w', 'Realised_to_Spot']
-    # **THIS IS THE FIX**: Sort the column names to ensure consistent order
     all_predictors = sorted(list(set(features_df.columns) - {'Target', 'Target_12w', 'close_usd'}))
 
     if forecast_date:
@@ -81,7 +80,7 @@ def generate_forecast(forecast_date: str = None):
     return_12w = price_reg_12w.predict(X_reg_12w_scaled)[0]
     price_target_12w = last_close_price * (1 + return_12w)
     
-    # --- 5. Calculate Forecast Ranges (Restored) ---
+    # --- 5. Calculate Forecast Ranges ---
     y_4w_full = features_df['Target'].dropna()
     X_4w_full_scaled = scaler_reg_4w.transform(features_df.loc[y_4w_full.index][all_predictors])
     X_seq_full, y_seq_full = create_sequences(pd.DataFrame(X_4w_full_scaled, index=y_4w_full.index), y_4w_full)
@@ -96,9 +95,17 @@ def generate_forecast(forecast_date: str = None):
     range_mod_12w = np.percentile(np.abs(errors_12w), 80)
 
     # --- 6. Assemble and Print Final Forecast ---
+    # **THIS IS THE FIX**: Added the Macro Regime calculation back in
+    regime_status = "Risk-Off"
+    # The features needed for the regime filter are in the 'all_predictors' list
+    if 'Liquidity_Z' in latest_flat.columns and 'DXY_26w_trend' in latest_flat.columns:
+        if not latest_flat.empty and latest_flat['Liquidity_Z'].iloc[0] > 0 and latest_flat['DXY_26w_trend'].iloc[0] < 1:
+            regime_status = "Risk-On"
+
     print("\n--- Final, Unified Forecast ---")
     print(f"Reference Week: {ref_date.strftime('%Y-%m-%d')}")
     print(f"Last Known Price: ${last_close_price:,.2f}")
+    print(f"Macro Regime: {regime_status}") # And print it here
     
     date_4w = ref_date + timedelta(weeks=4)
     print(f"\n--- 4-Week Outlook (for {date_4w.strftime('%Y-%m-%d')}) ---")
