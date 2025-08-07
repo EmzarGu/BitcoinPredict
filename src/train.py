@@ -29,10 +29,8 @@ def create_sequences(X, y, time_steps=4):
 
 def train_all_models():
     """
-    Trains the final hybrid model:
-    - Classifier: Logistic Regression
-    - 4-Week Regressor: LSTM Neural Network
-    - 12-Week Regressor: Lasso Regression
+    Trains the final hybrid model and saves the best performing versions
+    from the validation stage to prevent overfitting.
     """
     print("--- Starting Final Model Training ---")
 
@@ -49,28 +47,25 @@ def train_all_models():
     scaler = StandardScaler()
     X_scaled_df = pd.DataFrame(scaler.fit_transform(X_full), index=X_full.index, columns=X_full.columns)
 
-    # --- 3. Train Directional Classifier (Logistic Regression) ---
-    print("\n--- Training Directional Classifier ---")
+    # --- 3. Train and Validate Models ---
+    
+    # Classifier
+    print("\n--- Training & Validating Directional Classifier ---")
     y_4w_df = features_df[['Target']].dropna()
     X_class = X_scaled_df.loc[y_4w_df.index]
     def classify(ret): return 2 if ret > 0.05 else (0 if ret < -0.05 else 1)
     y_class = y_4w_df['Target'].apply(classify)
-
     X_train_cls, X_test_cls, y_train_cls, y_test_cls = train_test_split(X_class, y_class, test_size=0.2, shuffle=False)
-    
     classifier = LogisticRegression(max_iter=1000, multi_class='multinomial')
     classifier.fit(X_train_cls, y_train_cls)
     accuracy = accuracy_score(y_test_cls, classifier.predict(X_test_cls))
     print(f"✅ Final Classifier Accuracy: {accuracy:.2%}")
 
-    # --- 4. Train Price Target Regressors ---
-    
     # 4-Week Regressor (LSTM)
-    print("\n--- Training 4-Week Price Target Regressor (LSTM) ---")
+    print("\n--- Training & Validating 4-Week Regressor (LSTM) ---")
     y_4w_reg = features_df['Target'].dropna()
     X_4w_reg = X_scaled_df.loc[y_4w_reg.index]
     X_train_4w, X_test_4w, y_train_4w, y_test_4w = train_test_split(X_4w_reg, y_4w_reg, test_size=0.2, shuffle=False)
-
     time_steps = 4
     X_train_seq, y_train_seq = create_sequences(X_train_4w, y_train_4w, time_steps)
     X_test_seq, y_test_seq = create_sequences(X_test_4w, y_test_4w, time_steps)
@@ -85,38 +80,39 @@ def train_all_models():
     ])
     lstm_model.compile(optimizer='adam', loss='mean_squared_error')
     early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
-
     lstm_model.fit(X_train_seq, y_train_seq, epochs=100, batch_size=32,
                    validation_data=(X_test_seq, y_test_seq), callbacks=[early_stopping], verbose=0)
-
     predictions_4w = lstm_model.predict(X_test_seq)
     mape_4w = mean_absolute_percentage_error(y_test_seq, predictions_4w)
     print(f"✅ Final 4-Week LSTM MAPE: {mape_4w:.2%}")
     
     # 12-Week Regressor (Lasso)
-    print("\n--- Training 12-Week Price Target Regressor (Lasso) ---")
+    print("\n--- Training & Validating 12-Week Regressor (Lasso) ---")
     y_12w_reg = features_df['Target_12w'].dropna()
     X_12w_reg = X_scaled_df.loc[y_12w_reg.index]
     X_train_12w, X_test_12w, y_train_12w, y_test_12w = train_test_split(X_12w_reg, y_12w_reg, test_size=0.2, shuffle=False)
-    
-    lasso_reg_12w = Lasso(alpha=0.01) # Using a small alpha to start
+    lasso_reg_12w = Lasso(alpha=0.01)
     lasso_reg_12w.fit(X_train_12w, y_train_12w)
     predictions_12w = lasso_reg_12w.predict(X_test_12w)
     mape_12w = mean_absolute_percentage_error(y_test_12w, predictions_12w)
     print(f"✅ Final 12-Week Lasso MAPE: {mape_12w:.2%}")
 
-
-    # --- 5. Save the Final Models ---
-    print("\n\n--- Saving the best performing models ---")
-    classifier.fit(X_class, y_class) # Re-train on all data
+    # --- 4. Save the Final, Best Performing Models ---
+    print("\n\n--- Saving the best models from validation ---")
     
+    # **THIS IS THE FIX**: We train the final classifier and scaler on all data,
+    # but we save the REGRESSION models that were validated on the test set.
+    # This prevents overfitting and keeps our best results.
+    
+    final_classifier = LogisticRegression(max_iter=1000, multi_class='multinomial').fit(X_class, y_class)
+    final_scaler = StandardScaler().fit(X_full)
+
     models_dir = Path("artifacts/models")
     models_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(classifier, models_dir / "direction_classifier_final.joblib")
-    lstm_model.save(models_dir / "price_target_4w_final.h5")
-    lasso_reg_12w.fit(X_12w_reg, y_12w_reg) # Re-train on all data
-    joblib.dump(lasso_reg_12w, models_dir / "price_target_12w_final.joblib")
-    joblib.dump(scaler, models_dir / "scaler_final.joblib")
+    joblib.dump(final_classifier, models_dir / "direction_classifier_final.joblib")
+    lstm_model.save(models_dir / "price_target_4w_final.h5") # Save the best LSTM
+    joblib.dump(lasso_reg_12w, models_dir / "price_target_12w_final.joblib") # Save the best Lasso
+    joblib.dump(final_scaler, models_dir / "scaler_final.joblib")
 
     print("✅ All final models trained and saved successfully.")
 
