@@ -6,7 +6,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, mean_absolute_percentage_error
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, BayesianRidge
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
@@ -29,7 +29,10 @@ def create_sequences(X, y, time_steps=4):
 
 def train_all_models():
     """
-    Trains the final hybrid model and saves the best performing versions.
+    Trains the final hybrid model:
+    - Classifier: Logistic Regression
+    - 4-Week Regressor: LSTM Neural Network
+    - 12-Week Regressor: Bayesian Ridge
     """
     print("--- Starting Final Model Training ---")
 
@@ -60,16 +63,17 @@ def train_all_models():
     accuracy = accuracy_score(y_test_cls, classifier.predict(X_test_cls))
     print(f"✅ Final Classifier Accuracy: {accuracy:.2%}")
 
-    # --- 4. Train Price Target Regressor (LSTM) ---
-    print("\n--- Training Price Target Regressor (LSTM) ---")
-    y_reg = features_df['Target'].dropna()
-    X_reg = X_scaled_df.loc[y_reg.index]
-
-    X_train_reg, X_test_reg, y_train_reg, y_test_reg = train_test_split(X_reg, y_reg, test_size=0.2, shuffle=False)
+    # --- 4. Train Price Target Regressors ---
+    
+    # 4-Week Regressor (LSTM)
+    print("\n--- Training 4-Week Price Target Regressor (LSTM) ---")
+    y_4w_reg = features_df['Target'].dropna()
+    X_4w_reg = X_scaled_df.loc[y_4w_reg.index]
+    X_train_4w, X_test_4w, y_train_4w, y_test_4w = train_test_split(X_4w_reg, y_4w_reg, test_size=0.2, shuffle=False)
 
     time_steps = 4
-    X_train_seq, y_train_seq = create_sequences(X_train_reg, y_train_reg, time_steps)
-    X_test_seq, y_test_seq = create_sequences(X_test_reg, y_test_reg, time_steps)
+    X_train_seq, y_train_seq = create_sequences(X_train_4w, y_train_4w, time_steps)
+    X_test_seq, y_test_seq = create_sequences(X_test_4w, y_test_4w, time_steps)
 
     lstm_model = Sequential([
         LSTM(50, return_sequences=True, input_shape=(X_train_seq.shape[1], X_train_seq.shape[2])),
@@ -80,27 +84,38 @@ def train_all_models():
         Dense(1)
     ])
     lstm_model.compile(optimizer='adam', loss='mean_squared_error')
-    # **THIS IS THE FIX**: The EarlyStopping callback now saves the best model found during training
     early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
 
     lstm_model.fit(X_train_seq, y_train_seq, epochs=100, batch_size=32,
                    validation_data=(X_test_seq, y_test_seq), callbacks=[early_stopping], verbose=0)
 
-    predictions = lstm_model.predict(X_test_seq)
-    mape = mean_absolute_percentage_error(y_test_seq, predictions)
-    print(f"✅ Final LSTM MAPE: {mape:.2%}")
+    predictions_4w = lstm_model.predict(X_test_seq)
+    mape_4w = mean_absolute_percentage_error(y_test_seq, predictions_4w)
+    print(f"✅ Final 4-Week LSTM MAPE: {mape_4w:.2%}")
+    
+    # 12-Week Regressor (Bayesian Ridge) - RESTORED
+    print("\n--- Training 12-Week Price Target Regressor (Bayesian) ---")
+    y_12w_reg = features_df['Target_12w'].dropna()
+    X_12w_reg = X_scaled_df.loc[y_12w_reg.index]
+    X_train_12w, X_test_12w, y_train_12w, y_test_12w = train_test_split(X_12w_reg, y_12w_reg, test_size=0.2, shuffle=False)
+    
+    baye_reg_12w = BayesianRidge()
+    baye_reg_12w.fit(X_train_12w, y_train_12w)
+    predictions_12w = baye_reg_12w.predict(X_test_12w)
+    mape_12w = mean_absolute_percentage_error(y_test_12w, predictions_12w)
+    print(f"✅ Final 12-Week Bayesian MAPE: {mape_12w:.2%}")
+
 
     # --- 5. Save the Final, Best Performing Models ---
     print("\n\n--- Saving the best performing models ---")
-    # We re-train the classifier on all data, as it's less prone to overfitting
-    classifier.fit(X_class, y_class)
+    classifier.fit(X_class, y_class) # Re-train on all data
     
-    # For the LSTM, we save the version that performed best on the validation set
-    # This prevents the overfitting we saw before
     models_dir = Path("artifacts/models")
     models_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(classifier, models_dir / "direction_classifier_final.joblib")
-    lstm_model.save(models_dir / "price_target_regressor_final.h5")
+    lstm_model.save(models_dir / "price_target_4w_final.h5") # LSTM already has best weights
+    baye_reg_12w.fit(X_12w_reg, y_12w_reg) # Re-train on all data
+    joblib.dump(baye_reg_12w, models_dir / "price_target_12w_final.joblib")
     joblib.dump(scaler, models_dir / "scaler_final.joblib")
 
     print("✅ All final models trained and saved successfully.")
