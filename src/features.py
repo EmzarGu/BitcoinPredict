@@ -6,6 +6,7 @@ from typing import List
 import pandas as pd
 import numpy as np
 from scipy.optimize import curve_fit
+from scipy.signal import find_peaks
 import psycopg2
 from dotenv import load_dotenv
 
@@ -22,6 +23,7 @@ PREDICTOR_COLS: List[str] = [
     "DXY_26w_trend",
     "gold_corr_26w",
     "spx_corr_26w",
+    "Wave_Stage" # Added new experimental feature
 ]
 
 def _calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -105,6 +107,20 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     df['gold_corr_26w'] = btc_returns.rolling(window=26).corr(gold_returns)
     df['spx_corr_26w'] = btc_returns.rolling(window=26).corr(spx_returns)
 
+    # --- Elliott Wave Stage Feature (Simplified) ---
+    # Find peaks (highs) and troughs (lows) in the price data
+    peaks, _ = find_peaks(df['close_usd'], distance=52, prominence=10000) # distance=1 year
+    troughs, _ = find_peaks(-df['close_usd'], distance=52, prominence=10000)
+    # 0 = Impulsive (trending), 1 = Corrective (sideways/down after a peak)
+    df['Wave_Stage'] = 0
+    last_peak_idx = -1
+    for i in range(len(df)):
+        if i in peaks:
+            last_peak_idx = i
+        if last_peak_idx != -1 and i > last_peak_idx:
+            # If we are after a major peak, classify as a corrective phase
+            df.iloc[i, df.columns.get_loc('Wave_Stage')] = 1
+
     # --- Target Variables ---
     df["Target"] = df["close_usd"].shift(-4) / df["close_usd"] - 1
     df["Target_12w"] = df["close_usd"].shift(-12) / df["close_usd"] - 1
@@ -114,14 +130,10 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     existing_cols = [col for col in final_cols if col in df.columns]
     df = df[existing_cols]
 
-    # **THIS IS THE FIX**: Apply NaN dropping conditionally.
     if for_training:
-        # For training, we need complete rows with no NaNs in any column.
         df.dropna(inplace=True)
         df = df.tail(lookback_weeks)
     else:
-        # For forecasting, we only need the predictors to be non-NaN.
-        # This keeps the most recent rows where only Targets are NaN.
         df.dropna(subset=PREDICTOR_COLS, inplace=True)
 
     df = df.sort_index()
