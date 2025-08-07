@@ -12,11 +12,19 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# --- Add the new RSI feature to the list ---
+# --- Updated list of features to align with the design document ---
 FEATURE_COLS: List[str] = [
-    "Momentum_4w", "Momentum_12w", "Momentum_26w", "Realised_Price_Delta",
-    "nupl", "dxy_z", "ust10_z", "gold_price_z", "spx_index_z",
-    "DXY_Invert", "LGC_distance_z", "RSI_14w", "Target", "Target_12w"
+    "SMA_ratio_52w",
+    "LGC_distance_z",
+    "Liquidity_Z",
+    "Nupl_Z",
+    "Realised_to_Spot",
+    "RSI_14w",
+    "DXY_26w_trend",
+    "gold_corr_26w",
+    "spx_corr_26w",
+    "Target",
+    "Target_12w"
 ]
 
 def _calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -34,9 +42,10 @@ def _load_btc_weekly() -> pd.DataFrame:
     if db_url:
         try:
             conn = psycopg2.connect(db_url)
+            # Fetch all required columns, including liquidity data
             query = (
                 "SELECT week_start, close_usd, realised_price, nupl, "
-                "dxy, ust10, gold_price, spx_index "
+                "fed_liq, ecb_liq, dxy, ust10, gold_price, spx_index "
                 "FROM btc_weekly ORDER BY week_start"
             )
             df = pd.read_sql(query, conn)
@@ -46,7 +55,7 @@ def _load_btc_weekly() -> pd.DataFrame:
             return df
         except Exception as exc:
             logger.warning("Failed to read database: %s", exc)
-    
+
     try:
         df = pd.read_csv("data/btc_weekly_latest.csv")
         df["week_start"] = pd.to_datetime(df["week_start"], utc=True)
@@ -54,7 +63,7 @@ def _load_btc_weekly() -> pd.DataFrame:
         logger.info("Loaded %s rows from CSV fallback", len(df))
         return df
     except FileNotFoundError:
-        logger.error("No data source found for btc_weekly")
+        logger.error("No data source found for btc_weekly. Please run ingest.py.")
         return pd.DataFrame()
 
 def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.DataFrame:
@@ -64,8 +73,14 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
 
     df = df.set_index("week_start")
     df = df.sort_index()
+    df['close_usd'] = pd.to_numeric(df['close_usd'], errors='coerce')
 
-    # --- LGC Calculation ---
+    # --- Feature Engineering from Blueprint ---
+
+    # 1. SMA Ratio (52-week)
+    df["SMA_ratio_52w"] = df["close_usd"] / df["close_usd"].rolling(window=52).mean()
+
+    # 2. Log Growth Curve (LGC) Distance
     df_for_lgc = df[df['close_usd'] > 0].copy()
     def log_growth_curve(x, a, b): return a + b * np.log(x)
     x_data = np.arange(1, len(df_for_lgc) + 1)
@@ -80,28 +95,46 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
         logger.warning(f"Could not fit LGC: {e}")
         df['LGC_distance_z'] = 0
 
-    # --- Add RSI Feature ---
+    # 3. Liquidity Z-Score
+    df['global_liq'] = df['fed_liq'] + df['ecb_liq']
+    rolling_liq = df['global_liq'].pct_change(periods=52).rolling(window=52)
+    df['Liquidity_Z'] = (df['global_liq'].pct_change(periods=52) - rolling_liq.mean()) / rolling_liq.std()
+
+    # 4. NUPL Z-Score
+    rolling_nupl = df['nupl'].rolling(window=52)
+    df['Nupl_Z'] = (df['nupl'] - rolling_nupl.mean()) / rolling_nupl.std()
+
+    # 5. Market Value to Realized Value (MVRV)
+    df["Realised_to_Spot"] = df["close_usd"] / df["realised_price"]
+
+    # 6. Relative Strength Index (RSI)
     df["RSI_14w"] = _calculate_rsi(df["close_usd"])
 
-    # --- Other Features ---
-    df["Momentum_4w"] = df["close_usd"].pct_change(4)
-    df["Momentum_12w"] = df["close_usd"].pct_change(12)
-    df["Momentum_26w"] = df["close_usd"].pct_change(26)
-    df["Realised_Price_Delta"] = df["close_usd"] / df["realised_price"] - 1
+    # 7. DXY Trend
+    df["DXY_26w_trend"] = df['dxy'] / df['dxy'].rolling(window=26).mean()
 
-    for col in ["dxy", "ust10", "gold_price", "spx_index"]:
-        rolling = df[col].rolling(window=52)
-        df[f"{col}_z"] = (df[col] - rolling.mean()) / rolling.std()
-    
-    df["DXY_Invert"] = 1 / df["dxy"]
+    # 8. Correlation Features
+    btc_returns = df['close_usd'].pct_change()
+    gold_returns = df['gold_price'].pct_change()
+    spx_returns = df['spx_index'].pct_change()
+    df['gold_corr_26w'] = btc_returns.rolling(window=26).corr(gold_returns)
+    df['spx_corr_26w'] = btc_returns.rolling(window=26).corr(spx_returns)
 
+    # --- Target Variables ---
     df["Target"] = df["close_usd"].shift(-4) / df["close_usd"] - 1
     df["Target_12w"] = df["close_usd"].shift(-12) / df["close_usd"] - 1
 
+    # --- Final Processing ---
+    # Select only the columns defined in FEATURE_COLS
+    final_cols = [col for col in FEATURE_COLS if col in df.columns]
+    df = df[final_cols]
+
+
     if for_training:
-        predictor_cols = [col for col in FEATURE_COLS if "Target" not in col]
+        # Drop rows with NaNs in predictor columns before slicing
+        predictor_cols = [col for col in final_cols if "Target" not in col]
         df = df.dropna(subset=predictor_cols)
         df = df.tail(lookback_weeks)
-    
+
     df = df.sort_index()
     return df
