@@ -6,7 +6,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, mean_absolute_percentage_error
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression, BayesianRidge
+from sklearn.linear_model import LogisticRegression, Lasso
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
@@ -32,7 +32,7 @@ def train_all_models():
     Trains the final hybrid model:
     - Classifier: Logistic Regression
     - 4-Week Regressor: LSTM Neural Network
-    - 12-Week Regressor: Bayesian Ridge
+    - 12-Week Regressor: Lasso Regression
     """
     print("--- Starting Final Model Training ---")
 
@@ -93,29 +93,29 @@ def train_all_models():
     mape_4w = mean_absolute_percentage_error(y_test_seq, predictions_4w)
     print(f"✅ Final 4-Week LSTM MAPE: {mape_4w:.2%}")
     
-    # 12-Week Regressor (Bayesian Ridge) - RESTORED
-    print("\n--- Training 12-Week Price Target Regressor (Bayesian) ---")
+    # 12-Week Regressor (Lasso)
+    print("\n--- Training 12-Week Price Target Regressor (Lasso) ---")
     y_12w_reg = features_df['Target_12w'].dropna()
     X_12w_reg = X_scaled_df.loc[y_12w_reg.index]
     X_train_12w, X_test_12w, y_train_12w, y_test_12w = train_test_split(X_12w_reg, y_12w_reg, test_size=0.2, shuffle=False)
     
-    baye_reg_12w = BayesianRidge()
-    baye_reg_12w.fit(X_train_12w, y_train_12w)
-    predictions_12w = baye_reg_12w.predict(X_test_12w)
+    lasso_reg_12w = Lasso(alpha=0.01) # Using a small alpha to start
+    lasso_reg_12w.fit(X_train_12w, y_train_12w)
+    predictions_12w = lasso_reg_12w.predict(X_test_12w)
     mape_12w = mean_absolute_percentage_error(y_test_12w, predictions_12w)
-    print(f"✅ Final 12-Week Bayesian MAPE: {mape_12w:.2%}")
+    print(f"✅ Final 12-Week Lasso MAPE: {mape_12w:.2%}")
 
 
-    # --- 5. Save the Final, Best Performing Models ---
+    # --- 5. Save the Final Models ---
     print("\n\n--- Saving the best performing models ---")
     classifier.fit(X_class, y_class) # Re-train on all data
     
     models_dir = Path("artifacts/models")
     models_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(classifier, models_dir / "direction_classifier_final.joblib")
-    lstm_model.save(models_dir / "price_target_4w_final.h5") # LSTM already has best weights
-    baye_reg_12w.fit(X_12w_reg, y_12w_reg) # Re-train on all data
-    joblib.dump(baye_reg_12w, models_dir / "price_target_12w_final.joblib")
+    lstm_model.save(models_dir / "price_target_4w_final.h5")
+    lasso_reg_12w.fit(X_12w_reg, y_12w_reg) # Re-train on all data
+    joblib.dump(lasso_reg_12w, models_dir / "price_target_12w_final.joblib")
     joblib.dump(scaler, models_dir / "scaler_final.joblib")
 
     print("✅ All final models trained and saved successfully.")
