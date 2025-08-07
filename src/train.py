@@ -7,6 +7,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import accuracy_score, mean_absolute_percentage_error
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.linear_model import BayesianRidge # <-- This is the fix
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
