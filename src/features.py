@@ -12,15 +12,15 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# --- Add the new LGC_distance feature ---
+# --- Add the new LGC_distance_z feature ---
 FEATURE_COLS: List[str] = [
     "Momentum_4w", "Momentum_12w", "Momentum_26w", "Realised_Price_Delta",
     "nupl", "dxy_z", "ust10_z", "gold_price_z", "spx_index_z",
-    "DXY_Invert", "LGC_distance", "Target", "Target_12w"
+    "DXY_Invert", "LGC_distance_z", "Target", "Target_12w"
 ]
 
 def _load_btc_weekly() -> pd.DataFrame:
-    # ... (function is unchanged)
+    """Load btc_weekly data from the database or CSV fallback."""
     db_url = os.getenv("DATABASE_URL")
     if db_url:
         try:
@@ -56,29 +56,28 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     df = df.set_index("week_start")
     df = df.sort_index()
 
-    # --- THIS IS THE NEW LGC CALCULATION ---
-    # Ensure there are no zero or negative prices before taking the log
+    # --- LGC Calculation ---
     df_for_lgc = df[df['close_usd'] > 0].copy()
-    
-    def log_growth_curve(x, a, b):
-        return a + b * np.log(x)
-
+    def log_growth_curve(x, a, b): return a + b * np.log(x)
     x_data = np.arange(1, len(df_for_lgc) + 1)
     y_data = np.log(df_for_lgc['close_usd'])
-
     try:
         params, _ = curve_fit(log_growth_curve, x_data, y_data)
         df['lgc'] = np.exp(log_growth_curve(np.arange(1, len(df) + 1), *params))
         df['LGC_distance'] = (df['close_usd'] / df['lgc']) - 1
+        
+        # --- THIS IS THE FIX: Standardize the LGC feature ---
+        rolling_lgc = df['LGC_distance'].rolling(window=52)
+        df['LGC_distance_z'] = (df['LGC_distance'] - rolling_lgc.mean()) / rolling_lgc.std()
+        # ---------------------------------------------------
+
     except Exception as e:
         logger.warning(f"Could not fit LGC: {e}")
-        df['LGC_distance'] = 0 # Default to zero if the curve fails
-    # ----------------------------------------
-    
+        df['LGC_distance_z'] = 0
+
     df["Momentum_4w"] = df["close_usd"].pct_change(4)
     df["Momentum_12w"] = df["close_usd"].pct_change(12)
     df["Momentum_26w"] = df["close_usd"].pct_change(26)
-
     df["Realised_Price_Delta"] = df["close_usd"] / df["realised_price"] - 1
 
     for col in ["dxy", "ust10", "gold_price", "spx_index"]:
