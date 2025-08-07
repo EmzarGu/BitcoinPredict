@@ -6,3 +6,5 @@ pytest
 pytest-asyncio
 yfinance>=0.2
 pycoingecko
+tensorflow
+scikit-learn
