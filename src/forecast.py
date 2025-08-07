@@ -17,7 +17,8 @@ from src.train import create_sequences
 
 def generate_forecast(forecast_date: str = None):
     """
-    Generates a full, unified forecast with ranges and specific dates.
+    Generates a full, unified forecast, handling any date input and
+    including price target ranges and specific forecast dates.
     """
     print("--- Generating Unified Bitcoin Forecast ---")
 
@@ -26,7 +27,7 @@ def generate_forecast(forecast_date: str = None):
     features_df = build_features(for_training=False)
 
     if features_df.empty:
-        print("❌ Could not build features. Aborting.")
+        print("❌ Could not build features for forecasting. Aborting.")
         return
 
     try:
@@ -42,14 +43,13 @@ def generate_forecast(forecast_date: str = None):
     predictor_cols_exist = [col for col in PREDICTOR_COLS if col in features_df.columns]
     
     if forecast_date:
-        ref_date = pd.to_datetime(forecast_date, utc=True)
-        try:
-            end_loc = features_df.index.get_loc(ref_date)
-            latest_features_for_lstm = features_df.iloc[max(0, end_loc - 3):end_loc + 1]
-            latest_features_flat = features_df.loc[[ref_date]]
-        except KeyError:
-            print(f"❌ Forecast date {forecast_date} not found in the dataset.")
-            return
+        input_date = pd.to_datetime(forecast_date, utc=True)
+        # **THIS IS THE FIX**: Find the index of the nearest available date
+        nearest_date_index = features_df.index.get_indexer([input_date], method='nearest')[0]
+        ref_date = features_df.index[nearest_date_index]
+        
+        latest_features_for_lstm = features_df.iloc[max(0, nearest_date_index - 3):nearest_date_index + 1]
+        latest_features_flat = features_df.iloc[[nearest_date_index]]
     else:
         latest_features_for_lstm = features_df.tail(4)
         latest_features_flat = features_df.tail(1)
