@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# Renamed to PREDICTOR_COLS to be more specific
 PREDICTOR_COLS: List[str] = [
     "SMA_ratio_52w",
     "LGC_distance_z",
@@ -72,7 +71,7 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     df = df.sort_index()
     df['close_usd'] = pd.to_numeric(df['close_usd'], errors='coerce')
 
-    # --- Feature Engineering from Blueprint ---
+    # --- Feature Engineering ---
     df["SMA_ratio_52w"] = df["close_usd"] / df["close_usd"].rolling(window=52).mean()
 
     df_for_lgc = df[df['close_usd'] > 0].copy()
@@ -111,15 +110,15 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     df["Target_12w"] = df["close_usd"].shift(-12) / df["close_usd"] - 1
 
     # --- Final Processing ---
-    # Define the final set of columns to keep
     final_cols = ['close_usd', 'Target', 'Target_12w'] + PREDICTOR_COLS
-    
-    # Filter to only the columns that actually exist in the DataFrame
     existing_cols = [col for col in final_cols if col in df.columns]
     df = df[existing_cols]
 
+    # **THIS IS THE FIX**: Drop all rows with any NaN values after features are created.
+    # This ensures that any data passed to the models is clean.
+    df.dropna(inplace=True)
+
     if for_training:
-        df = df.dropna(subset=PREDICTOR_COLS)
         df = df.tail(lookback_weeks)
 
     df = df.sort_index()
