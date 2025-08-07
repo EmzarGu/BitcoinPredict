@@ -17,7 +17,7 @@ from src.features import build_features, PREDICTOR_COLS
 def train_all_models():
     """
     Trains, evaluates, and saves all predictive models.
-    Includes hyperparameter tuning for the classifier.
+    Now uses the new Wave_Stage feature and has an expanded tuning grid.
     """
     print("--- Starting Model Training & Evaluation ---")
 
@@ -51,10 +51,12 @@ def train_all_models():
     # --- 4. Hyperparameter Tuning for Classifier ---
     print("\n--- Tuning Directional Classifier (XGBoost)... ---")
     
+    # Expanded parameter grid
     param_grid = {
         'max_depth': [3, 5, 7],
-        'learning_rate': [0.01, 0.1, 0.2],
-        'n_estimators': [100, 200]
+        'learning_rate': [0.01, 0.05, 0.1],
+        'n_estimators': [100, 200, 300],
+        'gamma': [0, 0.1, 0.2] # Added gamma for regularization
     }
     
     grid_search = GridSearchCV(
