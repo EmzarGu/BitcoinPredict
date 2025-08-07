@@ -75,7 +75,15 @@ def train_all_models():
     X_train_seq, y_train_seq = create_sequences(X_train_4w, y_train_4w, time_steps)
     X_test_seq, y_test_seq = create_sequences(X_test_4w, y_test_4w, time_steps)
 
-    lstm_model = Sequential([...]) # Using placeholder for brevity, actual architecture is complex
+    # **THIS IS THE FIX**: Replaced the placeholder with the full LSTM architecture
+    lstm_model = Sequential([
+        LSTM(50, return_sequences=True, input_shape=(X_train_seq.shape[1], X_train_seq.shape[2])),
+        Dropout(0.2),
+        LSTM(50, return_sequences=False),
+        Dropout(0.2),
+        Dense(25),
+        Dense(1)
+    ])
     lstm_model.compile(optimizer='adam', loss='mean_squared_error')
     early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
     lstm_model.fit(X_train_seq, y_train_seq, epochs=100, batch_size=32,
@@ -106,12 +114,10 @@ def train_all_models():
     models_dir = Path("artifacts/models")
     models_dir.mkdir(parents=True, exist_ok=True)
     
-    # Save the models trained on the split, which are validated
     joblib.dump(classifier, models_dir / "direction_classifier_binary_final.joblib")
     lstm_model.save(models_dir / "price_target_4w_final.h5")
     joblib.dump(lasso_model_12w, models_dir / "price_target_12w_final.joblib")
     
-    # Save the scalers fitted on the full datasets
     joblib.dump(scaler_cls, models_dir / "scaler_classifier_final.joblib")
     joblib.dump(scaler_reg_4w, models_dir / "scaler_regressor_4w_final.joblib")
     joblib.dump(scaler_reg_12w, models_dir / "scaler_regressor_12w_final.joblib")
