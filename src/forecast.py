@@ -42,7 +42,8 @@ def generate_forecast(forecast_date: str = None):
 
     # --- 2. Get Latest Features ---
     high_importance_features = ['Liquidity_Z', 'LGC_distance_z', 'SMA_ratio_52w', 'Realised_to_Spot']
-    all_predictors = list(set(features_df.columns) - {'Target', 'Target_12w', 'close_usd'})
+    # **THIS IS THE FIX**: Sort the column names to ensure consistent order
+    all_predictors = sorted(list(set(features_df.columns) - {'Target', 'Target_12w', 'close_usd'}))
 
     if forecast_date:
         ref_date = pd.to_datetime(forecast_date, utc=True)
