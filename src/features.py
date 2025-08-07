@@ -12,8 +12,8 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# --- Updated list of features to align with the design document ---
-FEATURE_COLS: List[str] = [
+# Renamed to PREDICTOR_COLS to be more specific
+PREDICTOR_COLS: List[str] = [
     "SMA_ratio_52w",
     "LGC_distance_z",
     "Liquidity_Z",
@@ -23,8 +23,6 @@ FEATURE_COLS: List[str] = [
     "DXY_26w_trend",
     "gold_corr_26w",
     "spx_corr_26w",
-    "Target",
-    "Target_12w"
 ]
 
 def _calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
@@ -42,7 +40,6 @@ def _load_btc_weekly() -> pd.DataFrame:
     if db_url:
         try:
             conn = psycopg2.connect(db_url)
-            # Fetch all required columns, including liquidity data
             query = (
                 "SELECT week_start, close_usd, realised_price, nupl, "
                 "fed_liq, ecb_liq, dxy, ust10, gold_price, spx_index "
@@ -76,11 +73,8 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     df['close_usd'] = pd.to_numeric(df['close_usd'], errors='coerce')
 
     # --- Feature Engineering from Blueprint ---
-
-    # 1. SMA Ratio (52-week)
     df["SMA_ratio_52w"] = df["close_usd"] / df["close_usd"].rolling(window=52).mean()
 
-    # 2. Log Growth Curve (LGC) Distance
     df_for_lgc = df[df['close_usd'] > 0].copy()
     def log_growth_curve(x, a, b): return a + b * np.log(x)
     x_data = np.arange(1, len(df_for_lgc) + 1)
@@ -95,25 +89,17 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
         logger.warning(f"Could not fit LGC: {e}")
         df['LGC_distance_z'] = 0
 
-    # 3. Liquidity Z-Score
     df['global_liq'] = df['fed_liq'] + df['ecb_liq']
     rolling_liq = df['global_liq'].pct_change(periods=52).rolling(window=52)
     df['Liquidity_Z'] = (df['global_liq'].pct_change(periods=52) - rolling_liq.mean()) / rolling_liq.std()
 
-    # 4. NUPL Z-Score
     rolling_nupl = df['nupl'].rolling(window=52)
     df['Nupl_Z'] = (df['nupl'] - rolling_nupl.mean()) / rolling_nupl.std()
 
-    # 5. Market Value to Realized Value (MVRV)
     df["Realised_to_Spot"] = df["close_usd"] / df["realised_price"]
-
-    # 6. Relative Strength Index (RSI)
     df["RSI_14w"] = _calculate_rsi(df["close_usd"])
-
-    # 7. DXY Trend
     df["DXY_26w_trend"] = df['dxy'] / df['dxy'].rolling(window=26).mean()
 
-    # 8. Correlation Features
     btc_returns = df['close_usd'].pct_change()
     gold_returns = df['gold_price'].pct_change()
     spx_returns = df['spx_index'].pct_change()
@@ -125,15 +111,15 @@ def build_features(lookback_weeks: int = 260, for_training: bool = True) -> pd.D
     df["Target_12w"] = df["close_usd"].shift(-12) / df["close_usd"] - 1
 
     # --- Final Processing ---
-    # Select only the columns defined in FEATURE_COLS
-    final_cols = [col for col in FEATURE_COLS if col in df.columns]
-    df = df[final_cols]
-
+    # Define the final set of columns to keep
+    final_cols = ['close_usd', 'Target', 'Target_12w'] + PREDICTOR_COLS
+    
+    # Filter to only the columns that actually exist in the DataFrame
+    existing_cols = [col for col in final_cols if col in df.columns]
+    df = df[existing_cols]
 
     if for_training:
-        # Drop rows with NaNs in predictor columns before slicing
-        predictor_cols = [col for col in final_cols if "Target" not in col]
-        df = df.dropna(subset=predictor_cols)
+        df = df.dropna(subset=PREDICTOR_COLS)
         df = df.tail(lookback_weeks)
 
     df = df.sort_index()
