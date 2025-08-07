@@ -6,8 +6,7 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, mean_absolute_percentage_error
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression, BayesianRidge
-from tensorflow.keras.models import load_model
+from sklearn.linear_model import LogisticRegression, Lasso, BayesianRidge
 
 # --- Add project root to Python path ---
 project_root = Path(__file__).resolve().parents[1]
@@ -19,7 +18,7 @@ from src.features import build_features, PREDICTOR_COLS
 def train_all_models():
     """
     Trains, evaluates, and saves all predictive models.
-    The primary classifier is now Logistic Regression.
+    The price target model is now Lasso Regression.
     """
     print("--- Starting Model Training & Evaluation ---")
 
@@ -42,7 +41,6 @@ def train_all_models():
     y_12w = y_12w_df['Target_12w']
 
     # --- 3. Scale Data and Split ---
-    # Scaling is important for Logistic Regression
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_full)
     X_scaled_df = pd.DataFrame(X_scaled, index=X_full.index, columns=X_full.columns)
@@ -65,26 +63,24 @@ def train_all_models():
     print(f"\n✅ Directional Classifier (Logistic Regression):")
     print(f"   - Test Accuracy: {accuracy:.2%}")
 
-    # For consistency, let's also use a simpler model for price targets for now
-    # 4-Week Regressor (Bayesian Ridge)
-    price_reg_4w = BayesianRidge()
+    # 4-Week Regressor (Lasso)
+    price_reg_4w = Lasso(alpha=0.01) # Using a small alpha to start
     price_reg_4w.fit(X_train, y_train_reg)
     mape_4w = mean_absolute_percentage_error(y_test_reg, price_reg_4w.predict(X_test))
-    print(f"\n✅ Price Target Regressor (4-Week, Bayesian):")
+    print(f"\n✅ Price Target Regressor (4-Week, Lasso):")
     print(f"   - Test MAPE: {mape_4w:.2%}")
 
-    # 12-Week Regressor (Bayesian Ridge)
+    # 12-Week Regressor (Lasso)
     X_train_12w, X_test_12w, y_train_12w, y_test_12w = train_test_split(X_scaled_df.loc[y_12w_df.index], y_12w, test_size=0.2, shuffle=False)
-    price_reg_12w = BayesianRidge()
+    price_reg_12w = Lasso(alpha=0.01)
     price_reg_12w.fit(X_train_12w, y_train_12w)
     mape_12w = mean_absolute_percentage_error(y_test_12w, price_reg_12w.predict(X_test_12w))
-    print(f"\n✅ Price Target Regressor (12-Week, Bayesian):")
+    print(f"\n✅ Price Target Regressor (12-Week, Lasso):")
     print(f"   - Test MAPE: {mape_12w:.2%}")
 
     # --- 5. Re-train Final Models on All Data and Save ---
     print("\n\n--- Re-training final models on all available data ---")
     
-    # Scale all data before final training
     scaler_final = StandardScaler()
     X_scaled_full = scaler_final.fit_transform(X_full)
     X_scaled_full_df = pd.DataFrame(X_scaled_full, index=X_full.index, columns=X_full.columns)
@@ -98,9 +94,9 @@ def train_all_models():
     models_dir.mkdir(parents=True, exist_ok=True)
 
     joblib.dump(classifier, models_dir / "direction_classifier_logreg.joblib")
-    joblib.dump(price_reg_4w, models_dir / "price_target_4w_bayes.joblib")
-    joblib.dump(price_reg_12w, models_dir / "price_target_12w_bayes.joblib")
-    joblib.dump(scaler_final, models_dir / "scaler_final.joblib") # Save the final scaler
+    joblib.dump(price_reg_4w, models_dir / "price_target_4w_lasso.joblib")
+    joblib.dump(price_reg_12w, models_dir / "price_target_12w_lasso.joblib")
+    joblib.dump(scaler_final, models_dir / "scaler_final.joblib")
 
     print("✅ All final models trained and saved successfully.")
 
